@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="it" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deep Researcher</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Deep Researcher <span class="brand-sub">research agent verificabile</span></div>
+  <button id="theme-toggle" class="btn icon" aria-label="Cambia tema">◐</button>
+</header>
+
+<main class="grid">
+  <!-- ============ SINISTRA: input + cronologia ============ -->
+  <section class="col col-left" aria-label="Nuova ricerca e cronologia">
+    <form id="run-form" class="panel">
+      <h2>Nuova ricerca</h2>
+      <label for="question">Domanda</label>
+      <textarea id="question" rows="4" required
+        placeholder="Es: Quali sono le prove dell'esistenza di acqua su Marte?"></textarea>
+
+      <div class="row2">
+        <div>
+          <label for="depth">Profondità</label>
+          <select id="depth">
+            <option value="rapida">Rapida (1 ciclo)</option>
+            <option value="standard" selected>Standard (3 cicli)</option>
+            <option value="approfondita">Approfondita (5 cicli)</option>
+          </select>
+        </div>
+        <div>
+          <label for="language">Lingua</label>
+          <select id="language">
+            <option value="auto" selected>Auto</option>
+            <option value="it">Italiano</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row2">
+        <button id="start-btn" type="submit" class="btn primary">▶ Avvia</button>
+        <button id="stop-btn" type="button" class="btn danger" hidden>⏹ Interrompi</button>
+      </div>
+    </form>
+
+    <section class="panel" aria-label="Cronologia ricerche">
+      <h2>Cronologia</h2>
+      <ul id="history-list" class="history" role="list"></ul>
+    </section>
+  </section>
+
+  <!-- ============ CENTRO: status + activity + report ============ -->
+  <section class="col col-center" aria-label="Avanzamento e report">
+    <div id="statusbar" class="statusbar" role="status">
+      <span id="sb-state" class="badge idle">idle</span>
+      <span>⏱ <b id="sb-time">0:00</b></span>
+      <span>ciclo <b id="sb-cycle">–</b></span>
+      <span>fonti <b id="sb-sources">0</b></span>
+      <span>evidenze <b id="sb-evidence">0</b></span>
+      <span>query <b id="sb-queries">0</b></span>
+      <span>claims <b id="sb-claims">0</b></span>
+      <span class="engine">engine: <b id="sb-engine">…</b></span>
+    </div>
+
+    <section class="panel grow" aria-label="Attività in tempo reale">
+      <h2>Attività</h2>
+      <ul id="activity" class="activity" role="log" aria-live="polite"></ul>
+    </section>
+
+    <section class="panel grow" aria-label="Report">
+      <h2>Report</h2>
+      <div id="report" class="report"><p class="muted">In attesa del report…</p></div>
+    </section>
+  </section>
+
+  <!-- ============ DESTRA: popover citazioni + settings ============ -->
+  <section class="col col-right" aria-label="Dettagli e impostazioni">
+    <section id="popover" class="panel popover" hidden>
+      <div class="popover-head">
+        <h2 id="popover-title">Citazione</h2>
+        <button id="popover-close" class="btn icon" aria-label="Chiudi dettaglio">✕</button>
+      </div>
+      <div id="popover-body" class="popover-body"></div>
+    </section>
+
+    <section class="panel" aria-label="Impostazioni">
+      <h2>Impostazioni <span class="muted small">(via .env)</span></h2>
+      <dl id="settings-body" class="settings"></dl>
+    </section>
+
+    <section class="panel" aria-label="Motore di decisione">
+      <h2>Decision engine</h2>
+      <div id="decision-specs" class="specs"></div>
+    </section>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
