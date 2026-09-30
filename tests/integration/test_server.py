@@ -35,7 +35,7 @@ class FakeOrch:
 
 def _build(tmp_path: Path, monkeypatch):
     settings = Settings(db_path=tmp_path / "t.db", cache_dir=tmp_path / "c",
-                        cache_enabled=False)
+                        cache_enabled=False, _env_file=None)
     storage = Storage(settings.db_path)
     bus = EventBus(persist=storage.add_event)
     fake_orch = FakeOrch(bus)

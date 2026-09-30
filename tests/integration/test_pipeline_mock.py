@@ -39,10 +39,12 @@ PLAN_JSON = {
     "subquestions": [{"subquestion_id": "x1", "text": "Chi ha brevettato?"}],
     "queries": [{"subquestion_id": "x1", "text": "invenzione telefono brevetto"}],
 }
-READER_JSON = {"evidences": [{
-    "claim": "Bell brevettò il telefono nel 1876",
-    "quote": "Bell brevettò il telefono nel 1876",
-}]}
+READER_JSON = {"evidences": [
+    {"claim": "Bell brevettò il telefono nel 1876",
+     "quote": "Bell brevettò il telefono nel 1876"},
+    {"claim": "Gli esperimenti durarono anni",
+     "quote": "dopo anni di esperimenti"},
+]}
 VERIFIER_JSON = {"verdict": "VERIFIED", "reason": "quote matches"}
 
 
@@ -89,19 +91,21 @@ class FakeDecisionEngine:
 
 
 def _writer_fn(system, user, force_json):
-    m = re.search(r'"evidence_id":\s*"(ev_[a-z0-9]+)"', user)
-    eid = m.group(1)
+    eids = re.findall(r'"evidence_id":\s*"(ev_[a-z0-9]+)"', user)
     return json.dumps({
         "title": "Storia del telefono",
-        "markdown": "Bell brevettò il telefono nel 1876.",
+        "markdown": "Bell brevettò il telefono nel 1876. Gli esperimenti durarono anni.",
         "claims": [{"text": "Bell brevettò il telefono nel 1876.",
-                    "evidence_ids": [eid]}],
+                    "evidence_ids": [eids[0]]},
+                   {"text": "Gli esperimenti durarono anni.",
+                    "evidence_ids": eids[1:]}],
     })
 
 
 def _build(tmp_path: Path, monkeypatch=None):
     settings = Settings(db_path=tmp_path / "t.db",
-                        cache_dir=tmp_path / "cache", cache_enabled=False)
+                        cache_dir=tmp_path / "cache", cache_enabled=False,
+                        _env_file=None)  # isolate from the real .env
     storage = Storage(settings.db_path)
     bus = EventBus(persist=storage.add_event)
     monkeypatcher = monkeypatch
@@ -160,8 +164,8 @@ async def test_full_pipeline_mock(tmp_path, monkeypatch):
     assert "example.com" in md
     assert "1876" in md
 
-    assert len(storage.claims_for_run(run_id)) == 1
-    assert len(storage.evidences_for_run(run_id)) == 1
+    assert len(storage.claims_for_run(run_id)) == 2
+    assert len(storage.evidences_for_run(run_id)) == 2
     assert len(storage.decisions_for_run(run_id)) == 3  # is_relevant+type+quality
     assert len(storage.sources_for_run(run_id)) == 1
 

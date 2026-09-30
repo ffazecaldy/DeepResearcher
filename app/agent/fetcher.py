@@ -90,7 +90,10 @@ class Fetcher:
         raw = self._cache.get_json("fetch", self._cache_key(url))
         if not isinstance(raw, dict):
             return None
-        return FetchedDocument(**raw)
+        doc = FetchedDocument(**raw)
+        # identity belongs to the run, content is cacheable: fresh id per load
+        doc.source_id = FetchedDocument(url="").source_id
+        return doc
 
     def _to_cache(self, doc: FetchedDocument) -> None:
         if doc.fetch_status in (FetchStatus.FETCH_FAILED,):

@@ -46,6 +46,10 @@ class OpenAICompatClient(LLMClient):
         }
         if force_json:
             payload["response_format"] = {"type": "json_object"}
+        # GLM (z.ai) thinking mode eats the token budget before the content:
+        # disable it unless the operator re-enables it explicitly.
+        if "glm" in s.llm_model.lower():
+            payload["thinking"] = {"type": "disabled"}
         url = f"{s.llm_base_url.rstrip('/')}/chat/completions"
         data = await post_json(self._client, url, headers={}, payload=payload)
         try:

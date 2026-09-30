@@ -185,8 +185,9 @@ class Storage:
         )
 
     def add_chunk(self, chunk: Chunk) -> None:
+        # idempotent: the same chunk may be produced by multiple read passes
         self._exec(
-            "INSERT INTO chunks(id, source_id, idx, text, char_start, char_end)"
+            "INSERT OR IGNORE INTO chunks(id, source_id, idx, text, char_start, char_end)"
             " VALUES(?,?,?,?,?,?)",
             (chunk.chunk_id, chunk.source_id, chunk.idx, chunk.text,
              chunk.char_start, chunk.char_end),

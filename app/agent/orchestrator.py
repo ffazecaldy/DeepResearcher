@@ -88,6 +88,13 @@ class Orchestrator:
                     plan = await self.planner.make_plan(
                         question, language,
                         max_subquestions=_DEPTH_SUBQ[depth])
+                    # ids are only unique within a plan: prefix with run_id
+                    # (SQLite PKs are table-global, runs share the DB)
+                    prefix = run_id[:24]
+                    for i, sq in enumerate(plan.subquestions, start=1):
+                        sq.subquestion_id = f"{prefix}_sq{i}"
+                    for i, q in enumerate(plan.queries, start=1):
+                        q.query_id = f"{prefix}_q{i}"
                     subquestions = plan.subquestions
                     for sq in subquestions:
                         self.storage.add_subquestion(run_id, sq.subquestion_id,
@@ -146,8 +153,8 @@ class Orchestrator:
                               new_queries=[q.model_dump() for q in report.new_queries])
                     if report.new_queries:
                         plan.queries = [
-                            _as_query(q.subquestion_id, q.text, cycle + 1)
-                            for q in report.new_queries
+                            _as_query(self.run_id, q.subquestion_id, q.text, cycle + 1, i)
+                            for i, q in enumerate(report.new_queries)
                         ][:self.settings.max_queries_per_cycle]
                 self.emit("cycle_completed", cycle)
 
@@ -205,6 +212,16 @@ class Orchestrator:
                               evidences)
         if cancel.is_set():
             status = "cancelled"
+        # usage counters (llm client counters are process-cumulative: exact in CLI,
+        # approximate for a long-lived server sharing one client across runs)
+        self.storage.usage_inc(
+            run_id,
+            llm_calls=getattr(self.llm, "llm_calls", 0),
+            llm_tokens_in=getattr(self.llm, "tokens_in", 0),
+            llm_tokens_out=getattr(self.llm, "tokens_out", 0),
+            laya_decisions=getattr(self.decisions, "counts", {}).get("laya", 0),
+            llm_decisions=getattr(self.decisions, "counts", {}).get("llm", 0),
+        )
         self.storage.finish_run(run_id, status, error,
                                 bool(limit_note), limit_note)
         self.emit("run_completed" if status == "completed" else
@@ -290,13 +307,13 @@ class Orchestrator:
                 if budget <= 0:
                     break
                 sq = subquestions[0] if subquestions else None
+                self.storage.add_chunk(ch)  # once per chunk, before reading
                 found = await self.reader.extract_evidences(
                     question, sq.text if sq else "", ch,
                     max_evidences=min(4, budget),
                     subquestion_id=sq.subquestion_id if sq else None)
                 for e in found:
                     e.run_id = self.run_id
-                    self.storage.add_chunk(ch)
                     self.storage.add_evidence(e)
                     evidences.append(e)
                     budget -= 1
@@ -321,9 +338,9 @@ class Orchestrator:
 
 
 # ---------- module helpers ----------
-def _as_query(subquestion_id: str, text: str, cycle: int):
+def _as_query(run_id: str, subquestion_id: str, text: str, cycle: int, idx: int):
     from app.models import GeneratedQuery
-    return GeneratedQuery(query_id=f"q_c{cycle}_{abs(hash(text)) % 9999}",
+    return GeneratedQuery(query_id=f"{run_id[:24]}_qc{cycle}_{idx}",
                           subquestion_id=subquestion_id, text=text, cycle=cycle)
 
 
