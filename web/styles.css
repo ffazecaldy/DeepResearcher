@@ -68,12 +68,15 @@ html[data-theme="light"] .btn.pri{color:#fffaf0}
 /* ── corpo a 3 colonne ──────────────────────────────────────────────────── */
 .work{display:flex;min-height:calc(100vh - 45px);background:var(--bg)}
 .col{display:flex;flex-direction:column;gap:8px;padding:8px;min-width:0}
-.col-left{width:280px;flex:none;max-height:calc(100vh - 61px);overflow-y:auto}
-.col-center{flex:1 1 auto}
-.col-right{width:300px;flex:none;max-height:calc(100vh - 61px);overflow-y:auto}
+.col-left{width:var(--w-left,280px);flex:none;max-height:calc(100vh - 61px);overflow-y:auto;transition:width .12s}
+.col-center{flex:1 1 auto;transition:width .12s}
+.col-right{width:var(--w-right,300px);flex:none;max-height:calc(100vh - 61px);overflow-y:auto;transition:width .12s}
+.col-center.c-w{width:var(--w-center,60%);flex:none}
 @media (max-width:900px){
   .work{flex-direction:column}
   .col-left,.col-right{width:100%;max-height:none}
+  .col-center{width:100%!important;flex:none}
+  .resizers{display:none}
 }
 
 /* ── pannello generico ──────────────────────────────────────────────────── */
@@ -185,6 +188,33 @@ html[data-theme="light"] .btn.danger:hover{background:rgba(180,67,60,.07)}
   0%,100%{box-shadow:0 0 0 3px var(--amber-soft)}
   50%{box-shadow:0 0 0 6px rgba(232,163,61,.04)}
 }
+
+/* ── schede ciclo (subagent visual) ─────────────────────────────────────── */
+.cycle-tabs{margin-left:auto;display:flex;gap:4px}
+.ctab{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:4px;
+  border:1px solid var(--line);background:var(--bg);font-family:var(--mono);
+  font-size:9.5px;color:var(--dim)}
+.ctab .ct-dot{width:6px;height:6px;border-radius:50%;background:var(--faint);flex:none}
+.ctab.done .ct-dot{background:var(--gain)}
+.ctab.working{border-color:var(--amber-dk);color:var(--txt)}
+.ctab.working .ct-dot{background:var(--amber);animation:adot-pulse 1.6s ease-in-out infinite}
+.ctab .ct-spin{display:none;color:var(--amber)}
+.ctab.working .ct-spin{display:inline-flex;animation:spin-rot 1s linear infinite}
+
+/* ── indicatore lettura nell'header Attività ────────────────────────────── */
+.reading-ind{display:inline-flex;align-items:center;gap:5px;color:var(--amber);
+  font-size:10px}
+.reading-ind[hidden]{display:none}
+.ic.spin{animation:spin-rot 1s linear infinite}
+@keyframes spin-rot{to{transform:rotate(360deg)}}
+
+/* ── resizer colonne ────────────────────────────────────────────────────── */
+.resizers{display:inline-flex;gap:2px}
+.rbtn{display:inline-flex;align-items:center;justify-content:center;width:20px;
+  height:18px;border:1px solid var(--line);background:transparent;color:var(--dim);
+  border-radius:4px;cursor:pointer;padding:0}
+.rbtn:hover{color:var(--amber);border-color:var(--amber-dk)}
+.rbtn.on{color:var(--amber);border-color:var(--amber)}
 html[data-theme="light"] .action-banner.active .adot{
   animation-name:adot-pulse-light}
 @keyframes adot-pulse-light{

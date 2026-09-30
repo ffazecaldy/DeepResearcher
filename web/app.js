@@ -18,6 +18,8 @@ function icon(name, cls = "ic s12 ev-ic") {
 
 /* ============================== state ============================== */
 const state = {
+  reading: 0,
+  colSizes: { left: null, center: null, right: null },
   runId: null,
   status: "idle",          // idle|loading|running|completed|failed|cancelled
   startedAt: null,
@@ -135,6 +137,18 @@ function eventSentence(type, p = {}) {
 }
 
 function addActivity(type, cycle, payload) {
+  // pagine: un solo messaggio per URL per ciclo (i cicli rivalgono fonti viste:
+  // l'utente non deve vedere duplicati)
+  if (["source_queued", "source_fetching", "source_fetched", "source_reading"]
+      .includes(type)) {
+    const key = `${cycle}|${type}|${payload.url || ""}`;
+    if (!state.seenPageEvents) state.seenPageEvents = new Set();
+    if (state.seenPageEvents.has(key)) return;
+    state.seenPageEvents.add(key);
+  }
+  if (type === "cycle_started" && cycle === 1 && state.seenPageEvents) {
+    state.seenPageEvents.clear();  // nuovo run, riparto pulito
+  }
   const sentence = eventSentence(type, payload || {});
   if (!sentence) return;
   const li = document.createElement("li");
@@ -231,6 +245,8 @@ function handleEvent(ev) {
   const p = payload || {};
   addActivity(type, cycle, p);
   handleAction(type, p);
+  updateCycleTabs(type, cycle);
+  updateReadingIndicator(type);
 
   if (type === "cycle_started") state.cycle = cycle;
   if (type === "plan_generated") renderPlan(p);
@@ -250,8 +266,66 @@ function handleEvent(ev) {
   if (type === "run_completed") finishRun("completed");
   if (type === "run_failed") finishRun("failed");
   if (type === "run_cancelled") finishRun("cancelled");
-  if (type === "run_closed") { closeStream(); refreshHistory(); }
+  if (type === "run_closed") { closeStream(); refreshHistory(); collapseActivity(); }
   updateStatusbar();
+}
+
+/* ── schede ciclo: una "scheda subagent" per ciclo richiesto ────────────── */
+function expectedCycles() {
+  const d = $("depth").value;
+  return d === "rapida" ? 1 : d === "approfondita" ? 5 : 3;
+}
+
+function updateCycleTabs(type, cycle) {
+  const wrap = $("cycle-tabs");
+  if (!wrap) return;
+  if (type === "run_started") {
+    wrap.innerHTML = "";
+    const n = expectedCycles();
+    for (let i = 1; i <= n; i++) {
+      const b = document.createElement("span");
+      b.className = "ctab";
+      b.id = `ctab-${i}`;
+      b.innerHTML = '<span class="ct-dot"></span>' +
+        `<span class="ct-spin"><svg class="ic s12 spin"><use href="#i-loader"/></svg></span>` +
+        `<span>ciclo ${i}</span>`;
+      wrap.appendChild(b);
+    }
+    return;
+  }
+  if (!cycle) return;
+  const tab = document.getElementById(`ctab-${cycle}`);
+  if (!tab) return;
+  if (type === "cycle_started") tab.classList.add("working");
+  if (type === "cycle_completed") { tab.classList.remove("working"); tab.classList.add("done"); }
+  if (type === "run_completed" || type === "run_failed" || type === "run_cancelled") {
+    wrap.querySelectorAll(".ctab.working").forEach((t) => {
+      t.classList.remove("working");
+      t.classList.add(type === "run_completed" ? "done" : "working");
+    });
+  }
+}
+
+/* ── spinner "leggendo…" (SOLO pagine in lettura, niente rumore) ────────── */
+function updateReadingIndicator(type) {
+  const ind = $("reading-indicator");
+  if (!ind) return;
+  if (type === "source_reading") {
+    state.reading += 1;
+  } else if (type === "evidence_extracted" || type === "source_failed"
+             || type === "run_completed" || type === "run_failed"
+             || type === "run_cancelled") {
+    state.reading = 0;
+  }
+  ind.hidden = state.reading <= 0;
+}
+
+/* a fine run il feed si riduce: mostra solo gli ultimi 12 eventi */
+function collapseActivity() {
+  const list = $("activity");
+  while (list.children.length > 12) list.removeChild(list.lastChild);
+  const fc = $("feed-count");
+  if (fc) fc.textContent = `${list.children.length} eventi`;
 }
 
 /* ============================== statusbar ============================== */
@@ -330,6 +404,13 @@ async function openCitation(n) {
   const body = $("popover-body");
   const hint = $("popover-hint");
   if (hint) hint.hidden = true;
+  if (data.notFound) {
+    body.innerHTML = "<p class='dim'>Questo run è stato eliminato dalla " +
+      "cronologia: il dettaglio citazioni non è più disponibile.</p>";
+    $("popover-title").textContent = `Citazione [${n}]`;
+    pop.hidden = false;
+    return;
+  }
   const claims = (data.claims || []).filter(
     (c) => Number(c.citation_no) === Number(n));
   if (!claims.length) {
@@ -369,7 +450,15 @@ async function openCitation(n) {
 
 async function loadReportJson() {
   if (state.reportJson) return state.reportJson;
-  state.reportJson = await apiJson(`/api/runs/${state.runId}/report.json`);
+  try {
+    state.reportJson = await apiJson(`/api/runs/${state.runId}/report.json`);
+  } catch (e) {
+    if (String(e.message).startsWith("404")) {
+      return { claims: [], evidences: [], sources: [], verifications: [],
+               notFound: true };
+    }
+    throw e;
+  }
   return state.reportJson;
 }
 
@@ -516,6 +605,12 @@ function resetPanels() {
   $("plan").hidden = true;
   closePopover();
   setAction("", false);
+  state.reading = 0;
+  state.seenPageEvents = new Set();
+  const ri = $("reading-indicator");
+  if (ri) ri.hidden = true;
+  const ct = $("cycle-tabs");
+  if (ct) ct.innerHTML = "";
   state.cycle = null;
   state.counters = { sources: 0, evidence: 0, queries: 0, claims: 0,
                      tokens: 0, llm: 0 };
@@ -600,6 +695,30 @@ function init() {
   });
   formReset.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); formReset.click(); }
+  });
+  // resizer colonne: click = alterna larghezza larga/normale (limitata, salvata)
+  const LIM = { left: [200, 420], center: [40, 70], right: [220, 460] };
+  document.querySelectorAll(".rbtn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const col = btn.dataset.col;
+      const root = document.documentElement.style;
+      if (col === "center") {
+        const cur = state.colSizes.center ?? 60;
+        const next = cur >= 70 ? 40 : Math.min(70, cur + 15);
+        state.colSizes.center = next;
+        root.setProperty("--w-center", `${next}%`);
+        document.querySelector(".col-center").classList.add("c-w");
+        btn.classList.toggle("on", next !== 60);
+      } else {
+        const def = col === "left" ? 280 : 300;
+        const cur = state.colSizes[col] ?? def;
+        const [min, max] = LIM[col];
+        const next = cur >= max ? min : Math.min(max, cur + 80);
+        state.colSizes[col] = next;
+        root.setProperty(`--w-${col}`, `${next}px`);
+        btn.classList.toggle("on", next !== def);
+      }
+    });
   });
   $("plan-head").addEventListener("click", () => {
     const plan = $("plan");
