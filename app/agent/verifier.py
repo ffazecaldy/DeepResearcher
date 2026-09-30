@@ -15,6 +15,50 @@ log = logging.getLogger(__name__)
 _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 _VALID_VERDICTS = {"VERIFIED", "WEAKENED", "CORRECTED", "REMOVED", "FAILED"}
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_CITE_TOKEN = re.compile(r"\[\d+\]")
+_TRAILING_PUNCT = re.compile(r"[.!?…]+")
+
+
+def _claim_parts(claim_text: str) -> tuple[str, str]:
+    t = claim_text.strip()
+    m = re.match(r"^(.*?)([.!?…]+)$", t, re.DOTALL)
+    if m:
+        return m.group(1), m.group(2)
+    return t, ""
+
+
+def _claim_span(markdown: str, claim_text: str):
+    """Locate a claim tolerating displaced punctuation and [n] citations.
+
+    Writer output varies: 'frase.' / 'frase [1][2].' / 'frase. [1][2]' —
+    match head + optional citations + optional trailing punctuation.
+    """
+    head, punct = _claim_parts(claim_text)
+    tail_pat = r"(?:\s*\[\d+\])*" + (re.escape(punct) if punct else "")
+    return re.search(re.escape(head) + r"\s*" + tail_pat, markdown)
+
+
+def _replace_claim(markdown: str, claim_text: str, new_text: str) -> str | None:
+    """Replace the claim, re-attaching its citations and sentence punctuation."""
+    m = _claim_span(markdown, claim_text)
+    if m is None:
+        return None
+    group = m.group(0)
+    cites = "".join(_CITE_TOKEN.findall(group))
+    punct = _TRAILING_PUNCT.search(_claim_parts(claim_text)[1])
+    rebuilt = new_text.strip()
+    if punct:
+        rebuilt = rebuilt.rstrip(_TRAILING_PUNCT.pattern.strip("[]+")) + punct.group(0)
+    if cites:
+        rebuilt += " " + cites
+    return markdown[:m.start()] + rebuilt + markdown[m.end():]
+
+
+def _remove_claim(markdown: str, claim_text: str) -> str | None:
+    m = _claim_span(markdown, claim_text)
+    if m is None:
+        return None
+    return markdown[:m.start()] + markdown[m.end():]
 
 
 def _numbers(text: str) -> set[str]:
@@ -107,8 +151,9 @@ class Verifier:
             nonlocal markdown
             if not claim.evidence_ids or any(e not in ev_map for e in claim.evidence_ids):
                 claim.verdict, claim.verdict_reason = "REMOVED", "no valid evidence"
-                if claim.text in markdown:
-                    markdown = markdown.replace(claim.text, "", 1)
+                new_md = _remove_claim(markdown, claim.text)
+                if new_md is not None:
+                    markdown = new_md
                 return claim
             bad_numbers = self._unsupported_numbers(claim, ev_map)
             async with self._sem:  # bounded concurrency: providers rate-limit bursts
@@ -127,13 +172,17 @@ class Verifier:
                           f"quoted evidence; " + reason)
             claim.verdict, claim.verdict_reason = verdict, reason
             if verdict == "CORRECTED" and corrected:
-                if claim.text in markdown:
-                    markdown = markdown.replace(claim.text, corrected, 1)
+                new_md = _replace_claim(markdown, claim.text, corrected)
+                if new_md is not None:
+                    markdown = new_md
                     claim.corrected_text = corrected
                 else:
-                    claim.verdict, claim.verdict_reason = "FAILED", "corrected sentence not found in markdown"
-            elif verdict == "REMOVED" and claim.text in markdown:
-                markdown = markdown.replace(claim.text, "", 1)
+                    claim.verdict = "FAILED"
+                    claim.verdict_reason = "corrected sentence not found in markdown"
+            elif verdict == "REMOVED":
+                new_md = _remove_claim(markdown, claim.text)
+                if new_md is not None:
+                    markdown = new_md
             return claim
 
         claims = list(await asyncio.gather(*(one(c) for c in draft.claims)))
