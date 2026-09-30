@@ -273,7 +273,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path = _WEB_DIR / name
         if not path.exists():
             raise HTTPException(404, f"file frontend mancante: web/{name}")
-        return FileResponse(path, media_type=media)
+        return FileResponse(path, media_type=media,
+                            headers={"Cache-Control": "no-cache"})
 
     @app.get("/")
     async def index() -> FileResponse:

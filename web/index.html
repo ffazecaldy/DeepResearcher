@@ -57,9 +57,11 @@
   <!-- ============ SINISTRA: nuova ricerca + cronologia ============ -->
   <aside class="col col-left" aria-label="Nuova ricerca e cronologia">
     <form id="run-form" class="panel">
-      <div class="ph">
+      <div class="ph" id="form-reset" role="button" tabindex="0"
+           title="Clicca per azzerare modulo e pannelli" aria-label="Nuova ricerca: azzera modulo e pannelli">
         <svg class="ic"><use href="#i-search"/></svg>
         <span class="ttl">Nuova ricerca</span>
+        <span class="acts"><svg class="ic s12 dim"><use href="#i-chev-d"/></svg></span>
       </div>
       <div class="pb">
         <label for="question">Domanda</label>
@@ -185,7 +187,14 @@
             <svg class="ic s12"><use href="#i-x"/></svg></button>
         </span>
       </div>
-      <div id="popover-body" class="pb popover-body"></div>
+      <div id="popover-body" class="pb popover-body">
+        <div class="report-empty" id="popover-hint">
+          <svg class="ic s24"><use href="#i-book"/></svg>
+          <p>Le citazioni <b>[n]</b> nel report sono cliccabili:</p>
+          <p class="dim">qui vedi la fonte, l'evidenza testuale
+            (la frase esatta della pagina) e l'esito della verifica.</p>
+        </div>
+      </div>
     </section>
 
     <section class="panel" aria-label="Impostazioni">

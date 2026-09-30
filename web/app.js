@@ -328,6 +328,8 @@ async function openCitation(n) {
   const data = await loadReportJson();
   const pop = $("popover");
   const body = $("popover-body");
+  const hint = $("popover-hint");
+  if (hint) hint.hidden = true;
   const claims = (data.claims || []).filter(
     (c) => Number(c.citation_no) === Number(n));
   if (!claims.length) {
@@ -371,7 +373,11 @@ async function loadReportJson() {
   return state.reportJson;
 }
 
-function closePopover() { $("popover").hidden = true; }
+function closePopover() {
+  $("popover").hidden = true;
+  const hint = $("popover-hint");
+  if (hint) hint.hidden = false;
+}
 
 /* ============================== history ============================== */
 async function refreshHistory() {
@@ -582,6 +588,19 @@ function init() {
   $("stop-btn").addEventListener("click", stopRun);
   $("popover-close").addEventListener("click", closePopover);
   $("history-clear").addEventListener("click", clearHistory);
+  // header "Nuova ricerca" = reset visibile di modulo e pannelli
+  const formReset = $("form-reset");
+  formReset.addEventListener("click", () => {
+    if (state.status === "running") { toast("Interrompi il run corrente prima."); return; }
+    $("question").value = "";
+    resetPanels();
+    setStatus("idle");
+    state.runId = null;
+    $("question").focus();
+  });
+  formReset.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); formReset.click(); }
+  });
   $("plan-head").addEventListener("click", () => {
     const plan = $("plan");
     plan.classList.toggle("collapsed");
