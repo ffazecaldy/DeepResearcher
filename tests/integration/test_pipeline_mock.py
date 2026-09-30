@@ -60,7 +60,9 @@ class FakeSearchClient:
 
 
 class FakeFetcher:
-    async def fetch_all(self, items, budget=None) -> list[FetchedDocument]:
+    async def fetch_all(self, items, budget=None, on_event=None) -> list[FetchedDocument]:
+        if on_event:
+            on_event("source_fetching", "https://example.com/bell")
         return [FetchedDocument(
             source_id="src1", url="https://example.com/bell",
             final_url="https://example.com/bell", domain="example.com",
@@ -172,8 +174,8 @@ async def test_full_pipeline_mock(tmp_path, monkeypatch):
     ev_types = {e["type"] for e in storage.events_for_run(run_id)}
     for expected in ("run_started", "cycle_started", "plan_generated",
                      "search_result_found", "source_fetched", "source_evaluated",
-                     "evidence_extracted", "report_chunk", "claim_verified",
-                     "run_completed"):
+                     "source_reading", "evidence_extracted", "report_chunk",
+                     "claim_verified", "run_completed"):
         assert expected in ev_types, expected
 
     assert outcome.json_path and Path(outcome.json_path).exists()

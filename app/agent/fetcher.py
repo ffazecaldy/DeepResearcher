@@ -77,9 +77,11 @@ class Fetcher:
         return parser.can_fetch(self._settings.fetch_user_agent, url)
 
     # ---------- fetch ----------
-    async def fetch_all(self, items: list[SearchResultItem],
-                        budget: RuntimeBudget | None = None) -> list[FetchedDocument]:
-        tasks = [asyncio.create_task(self._one(item, budget)) for item in items]
+    async def fetch_all(self, items: list[SearchResultItem], budget: RuntimeBudget | None = None,
+                        on_event=None) -> list[FetchedDocument]:
+        """Fetch all items; ``on_event(kind, url)`` reports queued/fetching live."""
+        tasks = [asyncio.create_task(self._one(item, budget, on_event))
+                 for item in items]
         return list(await asyncio.gather(*tasks))
 
     def _cache_key(self, url: str) -> str:
@@ -102,16 +104,26 @@ class Fetcher:
         self._cache.set_json("fetch", self._cache_key(doc.url),
                              payload.model_dump())
 
-    async def _one(self, item: SearchResultItem,
-                   budget: RuntimeBudget | None) -> FetchedDocument:
+    async def _one(self, item: SearchResultItem, budget: RuntimeBudget | None,
+                   on_event=None) -> FetchedDocument:
         try:
             url = self._validate(item.url)
         except Exception as exc:
             return FetchedDocument(url=item.url, fetch_status=FetchStatus.FETCH_FAILED,
                                    error=f"unsafe url: {exc}")
+        if on_event:
+            try:
+                on_event("source_queued", url)
+            except Exception:
+                pass
         cached = self._from_cache(url)
         if cached is not None:
             return cached
+        if on_event:
+            try:
+                on_event("source_fetching", url)
+            except Exception:
+                pass
         if budget is not None:
             try:
                 budget.consume_page()

@@ -38,7 +38,7 @@ def build_orchestrator(settings: Settings | None = None, bus: EventBus | None = 
     reader = Reader(llm)
     gap_checker = GapChecker(llm)
     writer = Writer(llm)
-    verifier = Verifier(llm)
+    verifier = Verifier(llm, max_concurrency=settings.llm_max_concurrency)
 
     from app.decision.base import DecisionRouter
     from app.decision.llm_fallback import LLMDecisionEngine
@@ -46,9 +46,13 @@ def build_orchestrator(settings: Settings | None = None, bus: EventBus | None = 
     if settings.decision_engine.value == "laya":
         try:
             from app.decision.laya import LayaDecisionEngine
+            # defensive: an inline-comment value from .env must not reach laya
+            laya_model = (settings.laya_model or "").strip()
+            if laya_model.startswith("#"):
+                laya_model = ""
             primary = LayaDecisionEngine(
                 min_confidence=settings.laya_min_confidence,
-                model=settings.laya_model, max_len=settings.laya_max_len)
+                model=laya_model, max_len=settings.laya_max_len)
         except Exception as exc:  # never block startup on the decision engine
             import logging
             logging.getLogger(__name__).warning("laya engine unavailable: %s", exc)

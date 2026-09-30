@@ -18,7 +18,7 @@ from app.security import wrap_external  # noqa: F401  (re-exported for tests)
 log = logging.getLogger(__name__)
 
 _DEPTH_SUBQ = {Depth.RAPIDA: 3, Depth.STANDARD: 4, Depth.APPROFONDITA: 6}
-_MAX_EVIDENCES_PER_CYCLE = 12
+_MAX_EVIDENCES_PER_CYCLE = 30
 
 
 def _unwrap(x):
@@ -69,6 +69,9 @@ class Orchestrator:
         accepted_docs = []
         report_md = ""
         report_claims = []
+        self._stats = {"sources": 0, "evidences": 0}
+        self._cycle = 0
+        self._last_usage_emit = 0.0
 
         try:
             for cycle in range(1, self.settings.cycle_budget(depth) + 1):
@@ -80,6 +83,7 @@ class Orchestrator:
                 except LimitReached as exc:
                     limit_note = str(exc)
                     break
+                self._cycle = cycle
                 self.emit("cycle_started", cycle)
 
                 # ---- planning (first cycle only) ----
@@ -114,15 +118,20 @@ class Orchestrator:
                 items = await self.searcher.run_queries(
                     queries, self.settings.max_pages_per_query)
                 self.emit("search_result_found", cycle, count=len(items))
+                self._maybe_emit_usage()
                 if items:
+                    def _fetch_event(kind: str, url: str) -> None:
+                        self.emit(kind, cycle, url=url)
                     try:
-                        docs = await self.fetcher.fetch_all(items, budget)
+                        docs = await self.fetcher.fetch_all(items, budget,
+                                                            on_event=_fetch_event)
                     except LimitReached as exc:
                         docs = []
                         limit_note = str(exc)
                     for doc in docs:
                         self._persist_source(run_id, doc)
                         if doc.fetch_status.value.startswith(("SUCCESS", "PARTIAL")):
+                            self._stats["sources"] += 1
                             self.emit("source_fetched", cycle, source_id=doc.source_id,
                                       url=doc.final_url or doc.url)
                         else:
@@ -132,8 +141,10 @@ class Orchestrator:
                     accepted_docs.extend(accepted)
                     new_evs = await self._read_docs(question, cycle, accepted, subquestions)
                     evidences.extend(new_evs)
+                    self._stats["evidences"] += len(new_evs)
                     self.emit("evidence_extracted", cycle, count=len(new_evs),
                               total=len(evidences))
+                    self._maybe_emit_usage()
 
                 if cancel.is_set():
                     status = "cancelled"
@@ -299,25 +310,42 @@ class Orchestrator:
     async def _read_docs(self, question, cycle, accepted_docs, subquestions):
         evidences = []
         budget = _MAX_EVIDENCES_PER_CYCLE
+        per_source = max(1, self.settings.reader_chunks_per_source)
         for doc in accepted_docs:
             if budget <= 0:
                 break
-            chunks = _chunkify(doc)
-            for ch in chunks:
+            chunks = _chunkify(doc)[:per_source]  # deeper reads per source
+            # rotate the subquestion per chunk: every aspect of the plan is probed
+            for j, ch in enumerate(chunks):
                 if budget <= 0:
                     break
-                sq = subquestions[0] if subquestions else None
-                self.storage.add_chunk(ch)  # once per chunk, before reading
+                sq = subquestions[j % len(subquestions)] if subquestions else None
+                self.emit("source_reading", cycle, url=doc.final_url or doc.url,
+                          subquestion=sq.text if sq else "")
                 found = await self.reader.extract_evidences(
                     question, sq.text if sq else "", ch,
                     max_evidences=min(4, budget),
                     subquestion_id=sq.subquestion_id if sq else None)
+                self.storage.add_chunk(ch)
                 for e in found:
                     e.run_id = self.run_id
                     self.storage.add_evidence(e)
                     evidences.append(e)
                     budget -= 1
         return evidences
+
+    def _maybe_emit_usage(self) -> None:
+        """Throttled usage_update so the UI shows live counters."""
+        now = time.monotonic()
+        if now - self._last_usage_emit < self.settings.usage_emit_every_s:
+            return
+        self._last_usage_emit = now
+        self.emit("usage_update", self._cycle,
+                  llm_calls=getattr(self.llm, "llm_calls", 0),
+                  tokens_in=getattr(self.llm, "tokens_in", 0),
+                  tokens_out=getattr(self.llm, "tokens_out", 0),
+                  sources=self._stats["sources"],
+                  evidences=self._stats["evidences"])
 
     # ---------- export ----------
     def _export_json(self, run_id, question, path, report_md, claims, evidences):
@@ -348,7 +376,7 @@ def _chunkify(doc):
     from app.extraction.chunking import chunk_text
     out = []
     for i, (start, end, text) in enumerate(
-            chunk_text(doc.text, max_chars=4000, overlap=200)[:4]):
+            chunk_text(doc.text, max_chars=4000, overlap=200)):
         out.append(Chunk(chunk_id=f"chk_{doc.source_id}_{i}", source_id=doc.source_id,
                          idx=i, text=text, char_start=start, char_end=end))
     return out

@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 120.0
     llm_max_tokens: int = 4096
     llm_temperature: float = 0.2
+    llm_max_concurrency: int = 3  # max parallel LLM calls (provider 429 protection)
 
     # Search
     search_provider: SearchProvider = SearchProvider.TAVILY
@@ -64,6 +65,10 @@ class Settings(BaseSettings):
     fetch_max_redirects: int = 5
     per_domain_min_interval_s: float = 1.0
     respect_robots: bool = True
+
+    # Reader depth
+    reader_chunks_per_source: int = 8  # chunks read per accepted source (depth)
+    usage_emit_every_s: float = 2.0  # throttle for usage_update events
 
     # Limits
     max_cycles: int = 3

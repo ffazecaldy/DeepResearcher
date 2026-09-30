@@ -56,9 +56,11 @@ def _extract_json_object(text: str) -> dict:
 
 
 class Verifier:
-    def __init__(self, llm, prompts_dir: Path | None = None):
+    def __init__(self, llm, prompts_dir: Path | None = None,
+                 max_concurrency: int = 3):
         self._llm = llm
         self._prompts_dir = prompts_dir if prompts_dir is not None else _PROMPTS_DIR
+        self._sem = asyncio.Semaphore(max(1, max_concurrency))
 
     def _load(self) -> tuple[str, str]:
         raw = (self._prompts_dir / "verifier.txt").read_text(encoding="utf-8")
@@ -109,14 +111,16 @@ class Verifier:
                     markdown = markdown.replace(claim.text, "", 1)
                 return claim
             bad_numbers = self._unsupported_numbers(claim, ev_map)
-            try:
-                verdict, reason, corrected = await self._llm_verdict(
-                    system_tpl, user_tpl, question, claim, ev_map)
-            except Exception as exc:
-                log.warning("verifier: LLM check failed on %s: %s",
-                            claim.claim_id, exc)
-                claim.verdict, claim.verdict_reason = "FAILED", f"verification error: {exc}"
-                return claim
+            async with self._sem:  # bounded concurrency: providers rate-limit bursts
+                try:
+                    verdict, reason, corrected = await self._llm_verdict(
+                        system_tpl, user_tpl, question, claim, ev_map)
+                except Exception as exc:
+                    log.warning("verifier: LLM check failed on %s: %s",
+                                claim.claim_id, exc)
+                    claim.verdict, claim.verdict_reason = (
+                        "FAILED", f"verification error: {exc}")
+                    return claim
             if bad_numbers and verdict == "VERIFIED":
                 verdict = "WEAKENED"
                 reason = (f"numeric values {sorted(bad_numbers)} not present in "
