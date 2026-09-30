@@ -139,6 +139,13 @@ class Storage:
             else:
                 self._exec(f"DELETE FROM {t} WHERE run_id=?", (run_id,))
 
+    def clear_all_runs(self) -> int:
+        """Delete the whole history; returns the number of runs removed."""
+        n = self._query("SELECT COUNT(*) AS c FROM runs")[0]["c"]
+        for t in _TABLES_WITH_RUN:
+            self._exec(f"DELETE FROM {t}")
+        return int(n)
+
     # ---------- plan / queries ----------
     def add_subquestion(self, run_id: str, sid: str, idx: int, text: str) -> None:
         self._exec("INSERT INTO subquestions(id, run_id, idx, text) VALUES(?,?,?,?)",

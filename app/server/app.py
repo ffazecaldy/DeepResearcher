@@ -135,6 +135,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         storage.delete_run(run_id)
         return DeleteResponse()
 
+    @app.delete("/api/runs")
+    async def clear_runs() -> DeleteResponse:
+        """Wipe the whole history (active runs are cancelled first)."""
+        for handle in list(app.state.runs.values()):
+            handle.cancel.set()
+        await asyncio.sleep(0)  # let cancellation checkpoints observe the flag
+        app.state.runs.clear()
+        removed = storage.clear_all_runs()
+        return DeleteResponse(deleted=bool(removed >= 0))
+
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel_run(run_id: str) -> CancelResponse:
         handle = app.state.runs.get(run_id)

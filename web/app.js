@@ -506,7 +506,7 @@ function initTheme() {
 function resetPanels() {
   $("activity").innerHTML = "";
   $("feed-count").textContent = "0 eventi";
-  $("report").innerHTML = '<p class="muted">In attesa del report...</p>';
+  setReportEmpty();
   $("plan").hidden = true;
   closePopover();
   setAction("", false);
@@ -517,6 +517,26 @@ function resetPanels() {
   state.startedAt = Date.now();
   $("sb-time").textContent = "0:00";
   updateStatusbar();
+}
+
+function setReportEmpty() {
+  $("report").innerHTML =
+    '<div class="report-empty">' +
+    '<svg class="ic s24"><use href="#i-file"/></svg>' +
+    "<p>Il report apparira qui a fine ricerca,</p>" +
+    '<p class="dim">costruito solo sulle evidenze verificate.</p></div>';
+}
+
+async function clearHistory() {
+  if (!confirm("Svuotare DEFINITIVAMENTE tutta la cronologia?")) return;
+  try {
+    await api("/api/runs", { method: "DELETE" });
+    resetPanels();
+    setStatus("idle");
+    state.runId = null;
+    await refreshHistory();
+    toast("Cronologia svuotata");
+  } catch (e) { toast(`Svuotamento fallito: ${e.message}`); }
 }
 
 async function startRun(e) {
@@ -561,6 +581,7 @@ function init() {
   $("run-form").addEventListener("submit", startRun);
   $("stop-btn").addEventListener("click", stopRun);
   $("popover-close").addEventListener("click", closePopover);
+  $("history-clear").addEventListener("click", clearHistory);
   $("plan-head").addEventListener("click", () => {
     const plan = $("plan");
     plan.classList.toggle("collapsed");

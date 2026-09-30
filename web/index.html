@@ -98,7 +98,12 @@
       <div class="ph">
         <svg class="ic"><use href="#i-db"/></svg>
         <span class="ttl">Cronologia</span>
-        <span class="acts"><span id="history-count" class="badge">0</span></span>
+        <span class="acts">
+          <button id="history-clear" class="hbtn" type="button" title="Svuota tutta la cronologia" aria-label="Svuota cronologia">
+            <svg class="ic s12"><use href="#i-trash"/></svg>
+          </button>
+          <span id="history-count" class="badge">0</span>
+        </span>
       </div>
       <ul id="history-list" class="history" role="list"></ul>
     </section>
@@ -159,7 +164,13 @@
         <svg class="ic"><use href="#i-file"/></svg>
         <span class="ttl">Report</span>
       </div>
-      <div id="report" class="pb report"><p class="muted">In attesa del report...</p></div>
+      <div id="report" class="pb report">
+        <div class="report-empty">
+          <svg class="ic s24"><use href="#i-file"/></svg>
+          <p>Il report apparira qui a fine ricerca,</p>
+          <p class="dim">costruito solo sulle evidenze verificate.</p>
+        </div>
+      </div>
     </section>
   </section>
 
