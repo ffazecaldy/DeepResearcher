@@ -47,6 +47,18 @@ def _extract_json_object(text: str) -> str:
     raise ValueError("unbalanced JSON object")
 
 
+_WRITER_MAX_EVIDENCES = 30  # prompt cap: too many ids -> truncated/garbled JSON
+
+
+def _trim_evidences(evidences: list[Evidence],
+                    cap: int = _WRITER_MAX_EVIDENCES) -> list[Evidence]:
+    """Evenly sample evidences so every source/subquestion stays represented."""
+    if len(evidences) <= cap:
+        return evidences
+    step = len(evidences) / cap
+    return [evidences[int(i * step)] for i in range(cap)]
+
+
 class Writer:
     def __init__(self, llm, prompts_dir: Path | None = None):
         self._llm = llm
@@ -64,10 +76,12 @@ class Writer:
                     *, limit_note: str = "") -> DraftReport:
         if not evidences:
             raise WriterError("cannot write a report with zero evidences")
+        prompt_evidences = _trim_evidences(evidences)
+        valid_ids = {e.evidence_id for e in evidences}  # ALL ids remain valid targets
         system_tpl, user_tpl = self._load()
         ev_json = json.dumps(
             [{"evidence_id": e.evidence_id, "source_id": e.source_id,
-              "claim": e.claim, "quote": e.quote[:200]} for e in evidences],
+              "claim": e.claim, "quote": e.quote[:200]} for e in prompt_evidences],
             ensure_ascii=False)
         sq_json = json.dumps(
             [{"subquestion_id": s.subquestion_id, "text": s.text}
@@ -75,7 +89,29 @@ class Writer:
         user = user_tpl.format(question=question, language=language,
                                evidence_json=ev_json, subquestions_json=sq_json)
 
-        data = None
+        data = await self._ask(system_tpl, user)
+        claims = self._extract_claims(data, valid_ids)
+        if not claims:
+            # one explicit rescue: the model must anchor claims to the given ids
+            ids_hint = ", ".join(sorted(valid_ids)[:30])
+            repair = (user + "\n\nATTENZIONE: la risposta precedente non conteneva "
+                      "claim collegati alle evidenze. Riscrivi il report usando "
+                      "SOLO questi evidence_id: [" + ids_hint + "]")
+            data = await self._ask(system_tpl, repair)
+            claims = self._extract_claims(data, valid_ids)
+        if not claims:
+            raise WriterError("writer produced no claim backed by known evidence")
+        for i, c in enumerate(claims, start=1):
+            c.citation_no = i
+
+        markdown = str(data.get("markdown", "")).strip()
+        title = str(data.get("title", "")).strip() or question.strip()
+        if limit_note:
+            markdown += (f"\n\n> Nota: ricerca interrotta per limite raggiunto "
+                         f"— {limit_note}\n")
+        return DraftReport(title=title, markdown=markdown, claims=claims)
+
+    async def _ask(self, system_tpl: str, user: str) -> dict:
         raw = await self._llm.complete(system_tpl, user, force_json=True)
         try:
             data = json.loads(_extract_json_object(raw))
@@ -91,9 +127,9 @@ class Writer:
                 raise WriterError(f"writer returned invalid JSON twice: {exc2}") from exc2
         if not isinstance(data, dict):
             raise WriterError("writer JSON is not an object")
+        return data
 
-        valid_ids = {e.evidence_id for e in evidences}
-        dropped = 0
+    def _extract_claims(self, data: dict, valid_ids: set[str]) -> list[ReportClaim]:
         claims: list[ReportClaim] = []
         for c in data.get("claims", []) or []:
             if not isinstance(c, dict):
@@ -102,20 +138,7 @@ class Writer:
             ev_ids = [str(x) for x in (c.get("evidence_ids", []) or [])
                       if str(x) in valid_ids]
             if not text or not ev_ids:
-                dropped += 1
                 continue
             claims.append(ReportClaim(text=text, citation_no=0,
                                       evidence_ids=ev_ids))
-        for i, c in enumerate(claims, start=1):
-            c.citation_no = i
-        if not claims:
-            raise WriterError("writer produced no claim backed by known evidence")
-
-        markdown = str(data.get("markdown", "")).strip()
-        title = str(data.get("title", "")).strip() or question.strip()
-        if dropped:
-            log.warning("writer: dropped %d claims with unknown/empty evidence", dropped)
-        if limit_note:
-            markdown += (f"\n\n> Nota: ricerca interrotta per limite raggiunto "
-                         f"— {limit_note}\n")
-        return DraftReport(title=title, markdown=markdown, claims=claims)
+        return claims

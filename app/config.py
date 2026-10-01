@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:11434"
     llm_api_key: str = ""
     llm_timeout_s: float = 120.0
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 8192
     llm_temperature: float = 0.2
     llm_max_concurrency: int = 3  # max parallel LLM calls (provider 429 protection)
 
