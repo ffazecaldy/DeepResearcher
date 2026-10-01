@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     respect_robots: bool = True
 
     # Reader depth
-    reader_chunks_per_source: int = 8  # chunks read per accepted source (depth)
+    reader_chunks_per_source: int = 12  # chunks read per accepted source (depth)
     usage_emit_every_s: float = 2.0  # throttle for usage_update events
 
     # Limits

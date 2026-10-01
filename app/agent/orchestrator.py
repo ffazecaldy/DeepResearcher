@@ -18,7 +18,7 @@ from app.security import wrap_external  # noqa: F401  (re-exported for tests)
 log = logging.getLogger(__name__)
 
 _DEPTH_SUBQ = {Depth.RAPIDA: 3, Depth.STANDARD: 4, Depth.APPROFONDITA: 6}
-_MAX_EVIDENCES_PER_CYCLE = 30
+_MAX_EVIDENCES_PER_CYCLE = 60
 
 
 def _unwrap(x):
@@ -60,6 +60,7 @@ class Orchestrator:
                   language=language)
         budget = RuntimeBudget(max_runtime_seconds=self.settings.max_runtime_seconds,
                                max_total_pages=self.settings.max_total_pages)
+        seen_urls: set[str] = set()  # never re-pick pages already read
         status = "completed"
         error: str | None = None
         limit_note = ""
@@ -88,7 +89,8 @@ class Orchestrator:
 
                 # ---- planning (first cycle only) ----
                 if plan is None:
-                    self.emit("planning_started", cycle)
+                    self.emit("planning_started", cycle,
+                          note="Il bot sta analizzando la domanda e scegliendo le pagine")
                     plan = await self.planner.make_plan(
                         question, language,
                         max_subquestions=_DEPTH_SUBQ[depth])
@@ -117,6 +119,8 @@ class Orchestrator:
                 self.emit("query_started", cycle, count=len(queries))
                 items = await self.searcher.run_queries(
                     queries, self.settings.max_pages_per_query)
+                items = [it for it in items
+                         if it.url not in seen_urls]  # no re-reads across cycles
                 self.emit("search_result_found", cycle, count=len(items))
                 self._maybe_emit_usage()
                 if items:
@@ -153,6 +157,8 @@ class Orchestrator:
                 # ---- gap check ----
                 if depth != Depth.RAPIDA or cycle < self.settings.cycle_budget(depth):
                     self.emit("gap_check_started", cycle)
+                    for doc in accepted:
+                        seen_urls.add(doc.url)
                     report = await self.gap_checker.check(question, subquestions,
                                                           evidences)
                     if report.complete:
@@ -171,7 +177,10 @@ class Orchestrator:
 
             # ---- writing ----
             if evidences and not cancel.is_set():
-                self.emit("writing_started", 0)
+                self.emit("writing_started", 0,
+                          note="Il bot sta ragionando su come impostare il report")
+                self._maybe_emit_usage()
+                await asyncio.sleep(0.8)  # cede il loop: la UI vede la fase
                 draft = await self.writer.write(question, language, subquestions,
                                                 evidences, limit_note=limit_note)
                 for c in draft.claims:
@@ -181,7 +190,8 @@ class Orchestrator:
                           markdown=draft.markdown)
 
                 # ---- verification ----
-                self.emit("verification_started", 0)
+                self.emit("verification_started", 0,
+                          note="Il bot sta ricontrollando ogni frase sulle fonti")
                 ev_map = {e.evidence_id: e for e in evidences}
                 src_map = {d.source_id: d for d in accepted_docs}
                 verified = await self.verifier.verify(question, draft, ev_map, src_map)

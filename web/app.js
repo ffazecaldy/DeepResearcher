@@ -107,7 +107,7 @@ const CAT = {
 function eventSentence(type, p = {}) {
   switch (type) {
     case "run_started":        return "Ricerca avviata";
-    case "planning_started":   return "Pianificazione in corso";
+    case "planning_started":    return "Il bot sta analizzando la domanda e scegliendo le pagine";
     case "plan_generated":     return `Piano generato: ${(p.subquestions || []).length} sotto-domande, ${(p.queries || []).length} query`;
     case "cycle_started":      return "Ciclo avviato";
     case "query_started":      return `Cerco: avvio di ${p.count} query`;
@@ -120,10 +120,10 @@ function eventSentence(type, p = {}) {
     case "source_evaluated":   return `Valutata fonte ${shortUrl(p.url || p.source_id)} (tipo ${p.source_type || "?"}, qualità ${p.quality ?? "?"})`;
     case "source_rejected":    return `Scartata fonte ${shortUrl(p.source_id || p.url)} — ${p.reason || "non rilevante"}`;
     case "evidence_extracted": return `Estratte ${p.count} evidenze (tot ${p.total})`;
-    case "gap_check_started":  return "Controllo lacune informative";
+    case "gap_check_started":   return "Il bot sta controllando cosa manca";
     case "gap_detected":       return `Lacune rilevate: ${(p.missing || []).length} mancanti, ${(p.contradictions || []).length} contraddizioni, ${(p.new_queries || []).length} nuove query`;
-    case "writing_started":    return "Scrittura del report";
-    case "verification_started": return "Verifica dei claim in corso";
+    case "writing_started":     return "Il bot sta preparando il report";
+    case "verification_started": return "Il bot sta verificando ogni frase sulle fonti";
     case "claim_verified":     return `Verificato claim ${p.claim_id}`;
     case "claim_corrected":    return `Corretto claim ${p.claim_id} — ${p.reason || ""}`.trim();
     case "claim_removed":      return `Rimosso claim ${p.claim_id} — ${p.reason || ""}`.trim();
@@ -195,6 +195,10 @@ const ACTION_ACTIVE = {
     ? `leggendo ${shortUrl(p.url)} — sotto-domanda: ${p.subquestion}`
     : `leggendo ${shortUrl(p.url)}`,
   source_evaluated: (p) => `decidendo rilevanza: ${shortUrl(p.url || p.source_id)}`,
+  planning_started: () => "il bot sta analizzando la domanda e scegliendo le pagine",
+  gap_check_started: () => "il bot sta controllando cosa manca",
+  writing_started: () => "il bot sta preparando il report",
+  verification_started: () => "il bot sta verificando ogni frase sulle fonti",
 };
 /* tipi che COMPLETANO un'azione (ultima azione in grigio) */
 const ACTION_DONE = {
@@ -427,10 +431,16 @@ async function openCitation(n) {
         const src = (data.sources || []).find((s) => s.id === e.source_id);
         if (src) {
           const url = src.url_final || src.url;
+          const ann = [];
+          if (src.source_type) ann.push(`tipo: ${src.source_type}`);
+          if (src.quality_score != null) {
+            ann.push(`qualità: ${["bassa", "media", "alta"][src.quality_score] || src.quality_score}`);
+          }
           parts.push(`<p><span class="src-title">Fonte:</span> ` +
             `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">` +
             `${escapeHtml(src.title || url)}</a><br>` +
-            `<span class="muted">${escapeHtml(src.domain || "")}</span></p>`);
+            `<span class="muted">${escapeHtml(src.domain || "")}` +
+            (ann.length ? ` — ${escapeHtml(ann.join(", "))}` : "") + `</span></p>`);
         }
         parts.push(`<blockquote>“${escapeHtml(e.quote)}</blockquote>`);
         parts.push('<div class="sp"></div>');
@@ -439,6 +449,9 @@ async function openCitation(n) {
         parts.push(`<p><span class="verdict ${escapeHtml(v.verdict)}">` +
           `${escapeHtml(v.verdict)}</span> ` +
           `<span class="muted">${escapeHtml(v.reason || "")}</span></p>`);
+        if (v.corrected_text) {
+          parts.push(`<p><b>Testo corretto:</b> ${escapeHtml(v.corrected_text)}</p>`);
+        }
       }
       parts.push('<div class="sp"></div>');
     }
