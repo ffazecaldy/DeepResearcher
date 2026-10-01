@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     max_cycles: int = 3
     max_queries_per_cycle: int = 6
     max_pages_per_query: int = 5
+    max_pages_per_domain: int = 2  # per-cycle domain cap (0 = unlimited)
     max_total_pages: int = 30
     max_runtime_seconds: int = 600
     max_concurrency: int = 8
@@ -89,6 +90,7 @@ class Settings(BaseSettings):
     laya_max_len: int = 0  # 0 = model default
 
     # Storage / cache
+    report_language: str = "it"  # REPORT_LANGUAGE: global output language
     db_path: Path = Path("data/deep_researcher.db")
     cache_enabled: bool = True
     cache_dir: Path = Path("data/cache")

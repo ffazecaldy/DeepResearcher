@@ -60,6 +60,7 @@ class Searcher:
 
         out: list[SearchResultItem] = []
         seen: set[str] = set()
+        domain_used: dict[str, int] = {}
         for item in flat:
             try:
                 url = strip_tracking(item.url)
@@ -72,6 +73,15 @@ class Searcher:
             key = normalize_for_dedupe(url)
             if key in seen:
                 continue
+            # per-domain cap: more variety across sources (0 = unlimited)
+            cap = getattr(self._settings, "max_pages_per_domain", 2)
+            if cap:
+                from urllib.parse import urlsplit
+                d = (urlsplit(url).hostname or "?").lower()
+                if domain_used.get(d, 0) >= cap:
+                    log.debug("searcher: domain cap reached for %s: %s", d, url)
+                    continue
+                domain_used[d] = domain_used.get(d, 0) + 1
             seen.add(key)
             out.append(item)
         return out

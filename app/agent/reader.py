@@ -136,6 +136,10 @@ class Reader:
             subquestion=subquestion_text,
             external_content=wrap_external(chunk.text),
         )
+        lang_rule = (f"REGOLA: il campo 'claim' deve essere in italiano "
+                     f"(traduci i concetti); 'quote' resta SEMPRE nella lingua "
+                     f"originale del testo, copiata letteralmente.")
+        user = f"{lang_rule}\n\n{user}"
 
         try:
             raw = await self._llm.complete(system_tpl, user, force_json=True)

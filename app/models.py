@@ -113,6 +113,7 @@ class Evidence(BaseModel):
     source_id: str
     chunk_id: str
     quote: str
+    quote_it: str | None = None  # traduzione italiana (l'originale resta in `quote`)
     span_start: int | None = None
     span_end: int | None = None
     claim: str
@@ -133,6 +134,8 @@ class GapReport(BaseModel):
     missing_subquestions: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
     new_queries: list[NewQuery] = Field(default_factory=list)
+    partial_subquestions: list[str] = Field(default_factory=list)
+    status_by_id: dict[str, str] = Field(default_factory=dict)
 
 
 class ReportClaim(BaseModel):

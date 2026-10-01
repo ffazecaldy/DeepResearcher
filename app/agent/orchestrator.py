@@ -4,10 +4,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
 from app.config import Depth
+from app.agent.query_generator import QueryGenerator
+from app.agent.search_state import SearchState
 from app.events.bus import EventBus
 from app.limits import LimitReached, RuntimeBudget
 from app.models import (Chunk, DecisionKind, DecisionSpec, Event, RunOutcome,
@@ -16,6 +19,7 @@ from app.provenance.tracker import ProvenanceTracker
 from app.security import wrap_external  # noqa: F401  (re-exported for tests)
 
 log = logging.getLogger(__name__)
+diag = logging.getLogger("dr.diag")  # TEMP FASE A: logging diagnostico, da rimuovere
 
 _DEPTH_SUBQ = {Depth.RAPIDA: 3, Depth.STANDARD: 4, Depth.APPROFONDITA: 6}
 _MAX_EVIDENCES_PER_CYCLE = 60
@@ -29,7 +33,7 @@ def _unwrap(x):
 class Orchestrator:
     def __init__(self, settings, storage, bus: EventBus, llm,
                  searcher, fetcher, decisions, planner, reader,
-                 gap_checker, writer, verifier):
+                 gap_checker, writer, verifier, query_generator=None):
         self.settings = settings
         self.storage = storage
         self.bus = bus
@@ -42,7 +46,42 @@ class Orchestrator:
         self.gap_checker = gap_checker
         self.writer = writer
         self.verifier = verifier
+        self.query_generator = query_generator or QueryGenerator(llm)
         self.run_id: str = ""
+
+    # ---------- termination (SINGLE decision point) ----------
+    def _should_stop(self, *, cycle: int, effective: int, budget,
+                     gap_report, new_urls: int, new_domains: int,
+                     shared_state: SearchState) -> tuple[bool, str, str]:
+        """The ONLY place where the cycle loop may end early. Returns
+        (stop, reason, detail); every reason is logged and surfaced."""
+        # (a) complete coverage of every sub-question (decided in code)
+        if gap_report.complete:
+            return True, "COPERTURA_COMPLETA", (
+                "tutte le sotto-domande hanno almeno 2 fonti indipendenti")
+        # (c) declared limits
+        if budget.time_left() <= 0:
+            return True, "LIMITE_TEMPO", f"max_runtime_seconds={budget.max_runtime_seconds}"
+        if budget.pages_fetched >= budget.max_total_pages:
+            return True, "LIMITE_PAGINE", f"max_total_pages={budget.max_total_pages}"
+        # (d) two consecutive cycles without relevant novelty
+        if cycle >= 2 and new_urls == 0:
+            self._no_novelty = getattr(self, "_no_novelty", 0) + 1
+        else:
+            self._no_novelty = 0
+        if self._no_novelty >= 2:
+            return True, "NESSUNA_NOVITA", (
+                "due cicli consecutivi senza URL nuovi dopo diversificazione")
+        # (e) unsolvable: >=2 diversification attempts for every open sub-question
+        open_ids = (set(gap_report.status_by_id)
+                    - set(gap_report.covered_subquestions))
+        unsolvable = open_ids and all(
+            shared_state.attempts_by_sq.get(sid, 0) >= 2 for sid in open_ids)
+        if unsolvable:
+            return True, "SOTTODOMANDE_NON_RISOLVIBILI", (
+                f"sotto-domande non coperte dopo 2 tentativi: {sorted(open_ids)}")
+        # (b) otherwise: continue until MAX_CICLI (loop ends naturally)
+        return False, "", ""
 
     # ---------- events ----------
     def emit(self, type_: str, cycle: int, **payload) -> None:
@@ -61,6 +100,17 @@ class Orchestrator:
         budget = RuntimeBudget(max_runtime_seconds=self.settings.max_runtime_seconds,
                                max_total_pages=self.settings.max_total_pages)
         seen_urls: set[str] = set()  # never re-pick pages already read
+        # TEMP FASE A: diagnostica cicli
+        effective = self.settings.cycle_budget(depth)
+        diag.info(
+            "[CYCLES] depth=%s | DR_MAX_CYCLES=%s | preset=%s | EFFETTIVO=%s "
+            "(min dei due) | max_total_pages=%s | max_runtime=%ss",
+            depth.value, self.settings.max_cycles, _DEPTH_SUBQ.get(depth),
+            effective, self.settings.max_total_pages, self.settings.max_runtime_seconds)
+        shared_state = SearchState()
+        stop_reason: str = "MAX_CICLI"  # default when the loop ends naturally
+        stop_detail: str = ""
+        domain_by_source: dict[str, str] = {}
         status = "completed"
         error: str | None = None
         limit_note = ""
@@ -76,13 +126,16 @@ class Orchestrator:
 
         try:
             for cycle in range(1, self.settings.cycle_budget(depth) + 1):
+                diag.info("[CICLO %s] avvio (max=%s)", cycle, effective)
                 if cancel.is_set():
                     status = "cancelled"
+                    stop_reason, stop_detail = "ANNULLATO", "richiesta utente"
                     break
                 try:
                     budget.check_time()
                 except LimitReached as exc:
                     limit_note = str(exc)
+                    stop_reason, stop_detail = "LIMITE_TEMPO", str(exc)
                     break
                 self._cycle = cycle
                 self.emit("cycle_started", cycle)
@@ -115,12 +168,49 @@ class Orchestrator:
                               queries=[q.text for q in plan.queries[:cap]])
 
                 # ---- search ----
-                queries = plan.queries[:self.settings.max_queries_per_cycle]
+                if cycle == 1:
+                    queries = plan.queries[:self.settings.max_queries_per_cycle]
+                else:
+                    # BUG2: query diversificate SOLO sulle sotto-domande aperte
+                    open_ids = set(report_status_by_id) - set(report_covered_ids)
+                    open_sqs = [s for s in subquestions
+                                if s.subquestion_id in open_ids]
+                    for s in open_sqs:
+                        shared_state.attempts_by_sq[s.subquestion_id] = \
+                            shared_state.attempts_by_sq.get(s.subquestion_id, 0) + 1
+                    gen_queries = await self.query_generator.generate(
+                        question, open_sqs, shared_state, cycle)
+                    all_q = (gen_queries
+                             + [_as_query(self.run_id, q.subquestion_id, q.text,
+                                          cycle, i)
+                                for i, q in enumerate(gap_new_queries)])
+                    seen_texts = set()
+                    queries = []
+                    for q in all_q:
+                        if shared_state.already_ran(q.text):
+                            continue
+                        if q.text.lower() in seen_texts:
+                            continue
+                        seen_texts.add(q.text.lower())
+                        queries.append(q)
+                    queries = queries[:self.settings.max_queries_per_cycle]
+                    for q in queries:
+                        shared_state.see_query(q.text)
+                diag.info("[CICLO %s/%s] query: %s", cycle, effective,
+                          [q.text for q in queries])
                 self.emit("query_started", cycle, count=len(queries))
                 items = await self.searcher.run_queries(
                     queries, self.settings.max_pages_per_query)
                 items = [it for it in items
                          if it.url not in seen_urls]  # no re-reads across cycles
+                domains = {}
+                for it in items:
+                    from urllib.parse import urlsplit
+                    d = (urlsplit(it.url).hostname or "?")
+                    domains[d] = domains.get(d, 0) + 1
+                diag.info("[CICLO %s] risultati DOPO filtro seen_urls: %s | domini: %s",
+                          cycle, len(items), domains)
+                new_urls = len(items)
                 self.emit("search_result_found", cycle, count=len(items))
                 self._maybe_emit_usage()
                 if items:
@@ -152,37 +242,71 @@ class Orchestrator:
 
                 if cancel.is_set():
                     status = "cancelled"
+                    stop_reason, stop_detail = "ANNULLATO", "richiesta utente"
                     break
 
-                # ---- gap check ----
-                if depth != Depth.RAPIDA or cycle < self.settings.cycle_budget(depth):
-                    self.emit("gap_check_started", cycle)
-                    for doc in accepted:
-                        seen_urls.add(doc.url)
-                    report = await self.gap_checker.check(question, subquestions,
-                                                          evidences)
-                    if report.complete:
-                        self.emit("cycle_completed", cycle, complete=True)
-                        break
-                    self.emit("gap_detected", cycle,
-                              missing=report.missing_subquestions,
-                              contradictions=report.contradictions,
-                              new_queries=[q.model_dump() for q in report.new_queries])
-                    if report.new_queries:
-                        plan.queries = [
-                            _as_query(self.run_id, q.subquestion_id, q.text, cycle + 1, i)
-                            for i, q in enumerate(report.new_queries)
-                        ][:self.settings.max_queries_per_cycle]
+                # ---- gap check (coverage decided in code) ----
+                self.emit("gap_check_started", cycle)
+                for doc in accepted:
+                    seen_urls.add(doc.url)
+                    shared_state.add_url(doc.final_url or doc.url)
+                    domain_by_source[doc.source_id] = doc.domain
+                report = await self.gap_checker.check(question, subquestions,
+                                                      evidences,
+                                                      domain_of=domain_by_source)
+                diag.info("[CICLO %s] GAP complete=%s status=%s", cycle,
+                          report.complete, report.status_by_id)
+                gap_new_queries = list(report.new_queries)
+                report_status_by_id = dict(report.status_by_id)
+                report_covered_ids = set(report.covered_subquestions)
+
+                # ---- UNIQUE termination point ----
+                stop, stop_reason, stop_detail = self._should_stop(
+                    cycle=cycle, effective=effective, budget=budget,
+                    gap_report=report, new_urls=new_urls,
+                    new_domains=len({d for d in domains}),
+                    shared_state=shared_state)
+                if stop:
+                    diag.info("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
+                    self.emit("cycle_completed", cycle, complete=True,
+                              stop_reason=stop_reason, stop_detail=stop_detail)
+                    break
+                self.emit("gap_detected", cycle,
+                          missing=report.missing_subquestions,
+                          partial=report.partial_subquestions,
+                          status=report.status_by_id,
+                          contradictions=report.contradictions,
+                          new_queries=[q.model_dump() for q in report.new_queries])
                 self.emit("cycle_completed", cycle)
 
             # ---- writing ----
             if evidences and not cancel.is_set():
+                t_write = time.perf_counter()
+                out_lang = self.settings.report_language or language
+                diag.info("[WRITER] language=%s | evidenze totali=%s",
+                          out_lang, len(evidences))
                 self.emit("writing_started", 0,
                           note="Il bot sta ragionando su come impostare il report")
                 self._maybe_emit_usage()
                 await asyncio.sleep(0.8)  # cede il loop: la UI vede la fase
-                draft = await self.writer.write(question, language, subquestions,
+                limit_note = (limit_note or
+                              f"Terminazione: {stop_reason} — {stop_detail}")
+                draft = await self.writer.write(question, out_lang, subquestions,
                                                 evidences, limit_note=limit_note)
+                # BUG3: automatic language check, max 2 regenerations
+                from app.lang_check import looks_italian
+                attempts = 0
+                while (out_lang.startswith("it") and not looks_italian(draft.markdown)
+                       and attempts < 2):
+                    attempts += 1
+                    log.warning("writer: report non in italiano (tentativo %s), "
+                                "rigenerazione", attempts)
+                    draft = await self.writer.write(
+                        question, out_lang, subquestions, evidences,
+                        limit_note=limit_note)
+                diag.info("[WRITER] completato in %.1fs (rigenerazioni=%s, "
+                          "italiano=%s)", time.perf_counter() - t_write, attempts,
+                          looks_italian(draft.markdown))
                 for c in draft.claims:
                     self.storage.add_claim(run_id, c.claim_id, c.text,
                                            c.citation_no, c.evidence_ids)
@@ -393,6 +517,8 @@ def _chunkify(doc):
 
 
 def _final_markdown(title: str, body: str, claims, evidences, src_map) -> str:
+    # single H1: title added ONCE here; body must not carry its own
+    body = re.sub(r"^\s*#\s+[^\n]+\n+", "", body)
     lines = [f"# {title}", "", body.strip(), "", "## Fonti", ""]
     seen_src: dict[str, int] = {}
     for c in sorted(claims, key=lambda c: c.citation_no):

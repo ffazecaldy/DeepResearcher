@@ -88,6 +88,14 @@ class Writer:
              for s in subquestions], ensure_ascii=False)
         user = user_tpl.format(question=question, language=language,
                                evidence_json=ev_json, subquestions_json=sq_json)
+        # BUG3: language rule at the START and the END of the user prompt
+        lang_rule = (f"REGOLA LINGUA OBBLIGATORIA: scrivi l'INTERO report "
+                     f"(titolo, testo, sintesi, incertezze) esclusivamente in "
+                     f"italiano ({language}), anche se le fonti sono in inglese "
+                     f"o in un'altra lingua. Traduci concetti e citazioni; "
+                     f"mantieni in lingua originale SOLO nomi propri, sigle e "
+                     f"termini tecnici senza equivalente comune.")
+        user = f"{lang_rule}\n\n{user}\n\n{lang_rule}"
 
         data = await self._ask(system_tpl, user)
         claims = self._extract_claims(data, valid_ids)
@@ -105,6 +113,8 @@ class Writer:
             c.citation_no = i
 
         markdown = str(data.get("markdown", "")).strip()
+        # single H1: the writer must NOT emit its own top title (added once later)
+        markdown = re.sub(r"^\s*#\s+[^\n]+\n+", "", markdown)
         title = str(data.get("title", "")).strip() or question.strip()
         if limit_note:
             markdown += (f"\n\n> Nota: ricerca interrotta per limite raggiunto "
