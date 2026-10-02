@@ -19,7 +19,14 @@ from app.provenance.tracker import ProvenanceTracker
 from app.security import wrap_external  # noqa: F401  (re-exported for tests)
 
 log = logging.getLogger(__name__)
-diag = logging.getLogger("dr.diag")  # TEMP FASE A: logging diagnostico, da rimuovere
+# diagnostica cicli: attiva con DR_DEBUG=1 (default OFF in produzione)
+diag = logging.getLogger("dr.diag")
+if not diag.handlers:
+    _dh = logging.StreamHandler()
+    _dh.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    diag.addHandler(_dh)
+    diag.propagate = False
+    diag.setLevel(logging.DEBUG if __import__("os").environ.get("DR_DEBUG") else logging.CRITICAL + 1)
 
 _DEPTH_SUBQ = {Depth.RAPIDA: 3, Depth.STANDARD: 4, Depth.APPROFONDITA: 6}
 _MAX_EVIDENCES_PER_CYCLE = 60
@@ -123,6 +130,7 @@ class Orchestrator:
         self._stats = {"sources": 0, "evidences": 0}
         self._cycle = 0
         self._last_usage_emit = 0.0
+        self._timings: list[dict] = []  # FASE C: tempo per step per ciclo
 
         try:
             for cycle in range(1, self.settings.cycle_budget(depth) + 1):
@@ -168,6 +176,7 @@ class Orchestrator:
                               queries=[q.text for q in plan.queries[:cap]])
 
                 # ---- search ----
+                _t_search = time.perf_counter()
                 if cycle == 1:
                     queries = plan.queries[:self.settings.max_queries_per_cycle]
                 else:
@@ -212,8 +221,13 @@ class Orchestrator:
                           cycle, len(items), domains)
                 new_urls = len(items)
                 self.emit("search_result_found", cycle, count=len(items))
+                t_search = time.perf_counter() - _t_search
+                self._timings.append({"cycle": cycle, "step": "search",
+                                      "s": round(t_search, 1)})
+                diag.info("[TEMPI] ciclo %s search=%.1fs", cycle, t_search)
                 self._maybe_emit_usage()
                 if items:
+                    _t_fetch = time.perf_counter()
                     def _fetch_event(kind: str, url: str) -> None:
                         self.emit(kind, cycle, url=url)
                     try:
@@ -232,10 +246,19 @@ class Orchestrator:
                             self.emit("source_failed", cycle, source_id=doc.source_id,
                                       url=doc.url, error=doc.error)
                     accepted = await self._evaluate_docs(run_id, cycle, docs, question)
+                    t_fetch = time.perf_counter() - _t_fetch
+                    self._timings.append({"cycle": cycle, "step": "fetch+judge",
+                                          "s": round(t_fetch, 1)})
+                    diag.info("[TEMPI] ciclo %s fetch+judge=%.1fs", cycle, t_fetch)
                     accepted_docs.extend(accepted)
+                    _t_read = time.perf_counter()
                     new_evs = await self._read_docs(question, cycle, accepted, subquestions)
                     evidences.extend(new_evs)
                     self._stats["evidences"] += len(new_evs)
+                    self._timings.append({"cycle": cycle, "step": "read(LLM)",
+                                          "s": round(time.perf_counter() - _t_read, 1)})
+                    diag.info("[TEMPI] ciclo %s read=%.1fs", cycle,
+                              time.perf_counter() - _t_read)
                     self.emit("evidence_extracted", cycle, count=len(new_evs),
                               total=len(evidences))
                     self._maybe_emit_usage()
@@ -246,6 +269,7 @@ class Orchestrator:
                     break
 
                 # ---- gap check (coverage decided in code) ----
+                _t_gap = time.perf_counter()
                 self.emit("gap_check_started", cycle)
                 for doc in accepted:
                     seen_urls.add(doc.url)
@@ -259,6 +283,10 @@ class Orchestrator:
                 gap_new_queries = list(report.new_queries)
                 report_status_by_id = dict(report.status_by_id)
                 report_covered_ids = set(report.covered_subquestions)
+                self._timings.append({"cycle": cycle, "step": "gap_check(LLM)",
+                                      "s": round(time.perf_counter() - _t_gap, 1)})
+                diag.info("[TEMPI] ciclo %s gap=%.1fs", cycle,
+                          time.perf_counter() - _t_gap)
 
                 # ---- UNIQUE termination point ----
                 stop, stop_reason, stop_detail = self._should_stop(
@@ -377,6 +405,9 @@ class Orchestrator:
             "evidences": len(evidences),
             "claims": len(report_claims),
             "decisions": getattr(self.decisions, "counts", {}),
+            "stop_reason": stop_reason,
+            "stop_detail": stop_detail,
+            "timings": self._timings,
         }
         usage = self.storage.usage_for_run(run_id) or {}
         stats["llm_calls"] = getattr(self.llm, "llm_calls", 0)
