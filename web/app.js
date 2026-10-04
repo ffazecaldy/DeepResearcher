@@ -20,6 +20,8 @@ function icon(name, cls = "ic s12 ev-ic") {
 const state = {
   reading: 0,
   colSizes: { left: null, center: null, right: null },
+  failedChecks: 0,
+  lastSeq: null,
   runId: null,
   status: "idle",          // idle|loading|running|completed|failed|cancelled
   startedAt: null,
@@ -57,6 +59,10 @@ function toast(msg) {
 /* ============================== sse ============================== */
 function listenEvents(runId) {
   closeStream();
+  openStream(runId);
+}
+
+function openStream(runId) {
   const es = new EventSource(`/api/runs/${runId}/events`);
   state.eventSource = es;
   const types = [
@@ -75,7 +81,34 @@ function listenEvents(runId) {
   types.forEach((t) => es.addEventListener(t, (e) => {
     try { handleEvent(JSON.parse(e.data)); } catch (err) { console.error(err); }
   }));
-  es.onerror = () => { /* transient: EventSource ritenta da solo */ };
+  /* B1: su errore persistente mostra banner; /api/health ogni 5s per ricollegare */
+  es.onerror = () => {
+    if (state.status === "running") showServerBanner(true);
+  };
+}
+
+/* B1: banner "Server non raggiungibile" + riconnessione automatica */
+let _healthTimer = null;
+function showServerBanner(show) {
+  let b = $("server-banner");
+  if (show && !b) {
+    b = document.createElement("div");
+    b.id = "server-banner";
+    b.className = "server-banner";
+    b.innerHTML = "Server non raggiungibile. " +
+      '<button id="retry-btn" class="hbtn">Riprova</button>';
+    document.body.prepend(b);
+    $("retry-btn").addEventListener("click", () => location.reload());
+    _healthTimer = setInterval(async () => {
+      try {
+        const r = await fetch("/api/health");
+        if (r.ok) { location.reload(); }
+      } catch { /* ancora giu' */ }
+    }, 5000);
+  } else if (!show && b) {
+    b.remove();
+    if (_healthTimer) { clearInterval(_healthTimer); _healthTimer = null; }
+  }
 }
 
 function closeStream() {
@@ -247,6 +280,13 @@ function renderPlan(p) {
 function handleEvent(ev) {
   const { type, cycle, payload } = ev;
   const p = payload || {};
+  // B1: dedup eventi (replay + live possono sovrapporsi): id sequenziale per run
+  if (ev.seq != null) {
+    if (!state.lastSeq) state.lastSeq = new Map();
+    const prev = state.lastSeq.get(state.runId) || 0;
+    if (ev.seq <= prev && ev.type !== "replay_start") return;  // gia' visto
+    state.lastSeq.set(state.runId, ev.seq);
+  }
   addActivity(type, cycle, p);
   handleAction(type, p);
   updateCycleTabs(type, cycle);
@@ -254,7 +294,9 @@ function handleEvent(ev) {
 
   if (type === "cycle_started") state.cycle = cycle;
   if (type === "plan_generated") renderPlan(p);
-  if (type === "query_started") state.counters.queries += p.count || 0;
+  // B1: il contatore query arriva da UNA fonte (plan_generated) o da usage_update,
+  // mai sommato da query_started (era la causa del "1038")
+  if (type === "plan_generated") state.counters.queries = (p.queries || []).length;
   if (type === "source_fetched") state.counters.sources += 1;
   if (type === "evidence_extracted") state.counters.evidence = p.total || 0;
   if (type === "usage_update") {
@@ -267,7 +309,13 @@ function handleEvent(ev) {
     .includes(type)) state.counters.claims += 1;
   if (type === "run_started") setStatus("running");
   if (type === "report_chunk" && p.markdown) renderReport(p.markdown);
-  if (type === "run_completed") finishRun("completed");
+  if (type === "run_completed") {
+    // B1: "completata con N avvisi" quando ci sono verifiche fallite
+    finishRun(state.failedChecks ? "completed-warnings" : "completed");
+  }
+  if (type === "claim_failed") {
+    state.failedChecks = (state.failedChecks || 0) + 1;
+  }
   if (type === "run_failed") finishRun("failed");
   if (type === "run_cancelled") finishRun("cancelled");
   if (type === "run_closed") { closeStream(); refreshHistory(); collapseActivity(); }
@@ -336,11 +384,16 @@ function collapseActivity() {
 function setStatus(s) {
   state.status = s;
   const el = $("sb-state");
-  el.textContent = s;
-  el.className = `badge ${s}`;
+  if (s === "completed-warnings") {
+    el.textContent = `completata con ${state.failedChecks} avvisi`;
+    el.className = "badge completed-warnings";
+  } else {
+    el.textContent = s;
+    el.className = `badge ${s}`;
+  }
   const dot = $("pill-dot");
-  dot.className = `dot ${s}`;
-  $("pill-state").textContent = s;
+  dot.className = `dot ${s === "completed-warnings" ? "completed" : s}`;
+  $("pill-state").textContent = el.textContent;
   const running = s === "running";
   $("stop-btn").hidden = !running;
   $("start-btn").disabled = running;
@@ -619,6 +672,7 @@ function resetPanels() {
   closePopover();
   setAction("", false);
   state.reading = 0;
+  state.failedChecks = 0;
   state.seenPageEvents = new Set();
   const ri = $("reading-indicator");
   if (ri) ri.hidden = true;

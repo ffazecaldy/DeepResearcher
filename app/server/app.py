@@ -56,6 +56,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # B1: run orfani -> INTERROTTO (il server e' l'unica cosa che puo' avere
+        # run vivi; se il server riparte, nessun run e' davvero vivo)
+        orphans = [r["id"] for r in storage.list_runs() if r["status"] == "running"]
+        for oid in orphans:
+            storage.finish_run(oid, "INTERROTTO",
+                               error="server riavviato durante il run",
+                               limit_note="run interrotto")
+        if orphans:
+            log.warning("marcati %d run orfani come INTERROTTO: %s",
+                        len(orphans), orphans)
         yield
         await comps["aclose"]()
 
@@ -244,6 +254,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             filename=f"deep-researcher-{run_id}.pdf")
 
     # ---------- meta ----------
+    @app.get("/api/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "time": str(time.time())}
+
     @app.get("/api/decision-specs")
     async def decision_specs() -> dict[str, Any]:
         return decision_specs_response(settings)

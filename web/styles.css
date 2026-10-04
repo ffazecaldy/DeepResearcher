@@ -167,6 +167,7 @@ html[data-theme="light"] .btn.danger:hover{background:rgba(180,67,60,.07)}
 .badge.idle{color:var(--faint)}
 .badge.running{border-color:var(--amber-dk);color:var(--amber);background:var(--amber-soft)}
 .badge.completed{border-color:var(--gain);color:var(--gain)}
+.badge.completed-warnings{border-color:var(--warn);color:var(--warn)}
 .badge.failed{border-color:var(--loss);color:var(--loss)}
 .badge.cancelled,.badge.loading{border-color:var(--amber-dk);color:var(--amber)}
 .badge.neutral{color:var(--faint)}
@@ -292,6 +293,13 @@ button.citation{background:var(--amber-soft);color:var(--amber);border:1px solid
   line-height:1.5;cursor:pointer;vertical-align:1px;transition:background .12s,color .12s}
 button.citation:hover{background:var(--amber);color:#171207}
 html[data-theme="light"] button.citation:hover{color:#fffaf0}
+
+/* ── banner server non raggiungibile ────────────────────────────────────── */
+.server-banner{position:fixed;top:0;left:0;right:0;z-index:100;background:var(--loss);
+  color:#fff;padding:8px 14px;display:flex;gap:10px;align-items:center;
+  font-size:13px}
+.server-banner .hbtn{border-color:#fff;color:#fff}
+.server-banner .hbtn:hover{border-color:#fff;color:#fff;background:rgba(0,0,0,.15)}
 
 /* ── popover citazione ──────────────────────────────────────────────────── */
 .popover{flex:none}
