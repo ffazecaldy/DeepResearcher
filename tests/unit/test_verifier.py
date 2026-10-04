@@ -81,6 +81,57 @@ async def test_llm_error_marks_failed(tmp_path):
     assert out.claims[0].verdict == "FAILED"
 
 
+async def test_fuzzy_finds_merged_sentence():
+    from app.agent.verifier import _fuzzy_find
+    md = ("Deficit maggiori aumentano fatica, perdita muscolare e appetito, e "
+          "che più si è magri, più il ritmo di perdita dovrebbe essere "
+          "conservativo [8]. Altro testo.")
+    # claim = fusione delle due frasi: il fallback normalizzato lo trova
+    frag = _fuzzy_find(md, "Deficit maggiori aumentano fatica, perdita "
+                       "muscolare e appetito.")
+    assert frag is not None
+
+
+async def test_corrected_empty_retry_then_visible_warning(tmp_path):
+    # CORRECTED con corrected_text vuoto -> dopo retry resta FAILED ma VISIBILE
+    from app.agent.verifier import Verifier
+    from app.models import DraftReport, Evidence, ReportClaim
+
+    class _LLM:
+        async def complete(self, *a, **k):
+            return json.dumps({"verdict": "CORRECTED", "reason": "x",
+                               "corrected_text": ""})  # sempre vuoto
+
+    claim = ReportClaim(text="Frase che NON esiste nel markdown.",
+                        citation_no=1, evidence_ids=["ev1"])
+    v = Verifier(_LLM(), prompts_dir=_tmp_prompts(tmp_path))
+    draft = DraftReport(title="T", markdown="Testo senza la frase.", claims=[claim])
+    out = await v.verify("q", draft, {"ev1": _ev("ev1", "quote")}, {})
+    assert out.claims[0].verdict == "FAILED"
+    assert "corrected_text vuoto" in out.claims[0].verdict_reason
+
+
+async def test_fallback_normalized_replaces(tmp_path):
+    from app.agent.verifier import Verifier
+    from app.models import DraftReport, Evidence, ReportClaim
+    from tests.fakes import FakeLLMClient
+
+    claim = ReportClaim(text="Bell brevettò il telefono nel 1876.",
+                        citation_no=1, evidence_ids=["ev1"])
+    fake = FakeLLMClient([json.dumps({
+        "verdict": "CORRECTED", "reason": "ok",
+        "corrected_text": "Bell ottenne il brevetto nel 1876."})])
+    v = Verifier(fake, prompts_dir=_tmp_prompts(tmp_path))
+    ev = _ev("ev1", "quote")
+    # markdown con citazioni attaccate: il match esatto fallisce, quello
+    # normalizzato deve funzionare
+    md = "Bell brevettò il telefono nel 1876 [1]. Altro."
+    draft = DraftReport(title="T", markdown=md, claims=[claim])
+
+    out = await v.verify("q", draft, {"ev1": ev}, {})
+    assert "ottenne il brevetto" in out.markdown
+
+
 async def test_verified_happy_path(tmp_path):
     claim = ReportClaim(text="Bell brevettò il telefono nel 1876.",
                         citation_no=1, evidence_ids=["ev1"])

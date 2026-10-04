@@ -66,6 +66,40 @@ def _numbers(text: str) -> set[str]:
     return {m.group(0).replace(",", ".") for m in _NUMBER_RE.finditer(text)}
 
 
+def _norm_md(s: str) -> str:
+    """Normalization for the fallback match: no [n] markers, collapsed
+    whitespace, lowercase, punctuation stripped."""
+    s = re.sub(r"\[\d+\]", " ", s)
+    s = re.sub(r"[^\w\sà-ù]", " ", s)
+    return " ".join(s.lower().split())
+
+
+def _fuzzy_find(markdown: str, claim_text: str) -> str | None:
+    """Fallback B2: normalized substring; then segment-similarity for merged
+    sentences (claim = fusion of two markdown sentences). Returns the matched
+    markdown fragment or None."""
+    n_md = _norm_md(markdown)
+    n_claim = _norm_md(claim_text)
+    if n_claim and n_claim in n_md:
+        return claim_text
+    words = n_claim.split()
+    if len(words) < 8:
+        return None
+    from difflib import SequenceMatcher
+    segments = [s for s in re.split(r"(?<=[.!?])\s+|\n", markdown) if s.strip()]
+    n_segments = [_norm_md(s) for s in segments]
+    for frac in (1.0, 0.5):
+        w = max(4, int(len(words) * frac))
+        for i in range(0, max(1, len(words) - w + 1)):
+            piece = " ".join(words[i:i + w])
+            for seg, ns in zip(segments, n_segments):
+                if len(ns) < 10:
+                    continue
+                if SequenceMatcher(None, piece, ns).ratio() >= 0.85:
+                    return seg.strip()
+    return None
+
+
 def _extract_json_object(text: str) -> dict:
     t = text.strip()
     m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", t, re.DOTALL)
@@ -166,6 +200,24 @@ class Verifier:
                     claim.verdict, claim.verdict_reason = (
                         "FAILED", f"verification error: {exc}")
                     return claim
+            # corrected_text vuoto con CORRECTED -> retry esplicito (B2)
+            if verdict == "CORRECTED" and not (corrected or "").strip():
+                for _retry in range(2):
+                    try:
+                        verdict, reason, corrected = await self._llm_verdict(
+                            system_tpl, user_tpl, question, claim, ev_map)
+                        if (corrected or "").strip():
+                            break
+                    except Exception as exc:
+                        log.warning("verifier: retry %s su %s: %s",
+                                    _retry + 1, claim.claim_id, exc)
+                        await asyncio.sleep(1)
+            if verdict == "CORRECTED" and not (corrected or "").strip():
+                # il modello non ha prodotto il testo corretto nemmeno dopo i
+                # retry: NON e' una verifica riuscita -> visibile come failed
+                verdict, reason = "FAILED", (
+                    "il verifier ha richiesto una correzione ma il testo "
+                    "corretto non e' stato prodotto (corrected_text vuoto)")
             if bad_numbers and verdict == "VERIFIED":
                 verdict = "WEAKENED"
                 reason = (f"numeric values {sorted(bad_numbers)} not present in "
@@ -173,12 +225,23 @@ class Verifier:
             claim.verdict, claim.verdict_reason = verdict, reason
             if verdict == "CORRECTED" and corrected:
                 new_md = _replace_claim(markdown, claim.text, corrected)
+                if new_md is None and _fuzzy_find(markdown, claim.text):
+                    # fallback normalizzato: sostituisco il frammento trovato
+                    frag = _fuzzy_find(markdown, claim.text)
+                    new_md = _replace_claim(markdown, frag, corrected)
                 if new_md is not None:
                     markdown = new_md
                     claim.corrected_text = corrected
                 else:
+                    # B2: MAI silenzio -> frase marcata NON VERIFICATA nel report
                     claim.verdict = "FAILED"
-                    claim.verdict_reason = "corrected sentence not found in markdown"
+                    claim.verdict_reason = (
+                        "frase del claim non ritrovata nel markdown "
+                        "(nemmeno con matching normalizzato): citazione "
+                        "segnalata come non verificata")
+                    markdown = markdown.replace(claim.text,
+                        claim.text + " ⚠ *non verificata*", 1) \
+                        if claim.text in markdown else markdown
             elif verdict == "REMOVED":
                 new_md = _remove_claim(markdown, claim.text)
                 if new_md is not None:
