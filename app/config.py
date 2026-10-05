@@ -53,6 +53,8 @@ class Settings(BaseSettings):
 
     # Search
     search_provider: SearchProvider = SearchProvider.TAVILY
+    # B4: provider extra in cascata (CSV, es. "duckduckgo,tavily"); vuoto = solo primario
+    search_providers: str = ""
     tavily_api_key: str = ""
     tavily_base_url: str = "https://api.tavily.com"
     brave_api_key: str = ""
@@ -77,6 +79,9 @@ class Settings(BaseSettings):
     max_pages_per_domain: int = 2  # per-cycle domain cap (0 = unlimited)
     max_total_pages: int = 30
     max_runtime_seconds: int = 600
+    # B5: budget tempo PER CICLO (0 = disattivo); fermare cicli stantii senza
+    # uccidere il budget complessivo del run
+    max_seconds_per_cycle: int = 0
     max_concurrency: int = 8
     reader_max_doc_chars: int = 16000
 

@@ -15,6 +15,24 @@ def domain_of(url: str) -> str:
     return (urlsplit(url).hostname or "").lower()
 
 
+# B4: ruoli del ciclo — esplorazione (1), approfondimento (2), verifica (3+)
+CYCLE_ROLES: dict[int, str] = {1: "esplorazione", 2: "approfondimento"}
+
+
+def cycle_role(cycle: int) -> str:
+    """Ruolo dichiarato del ciclo (payload di cycle_started)."""
+    return CYCLE_ROLES.get(max(1, cycle), "verifica")
+
+
+def novelty_score(url: str, state: "SearchState") -> int:
+    """Scala di novità: dominio nuovo=2, URL nuovo su dominio già visto=1,
+    URL già visto=0. Deterministica, zero LLM."""
+    key = state.norm_url(url)
+    if key in state.seen_urls:
+        return 0
+    return 2 if state.domain_count.get(domain_of(url), 0) == 0 else 1
+
+
 @dataclass
 class SearchState:
     """Everything the pipeline remembers across cycles."""

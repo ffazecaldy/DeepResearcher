@@ -21,7 +21,14 @@ def build_orchestrator(settings: Settings | None = None, bus: EventBus | None = 
     from app.clients.llm.base import build_llm_client
     from app.clients.search.base import build_search_client
     llm = build_llm_client(settings)
-    search = build_search_client(settings)
+    # B4: provider multipli -> MultiProviderSearchClient in cascata
+    from app.clients.search.multi import build_search_clients
+    _clients = build_search_clients(settings)
+    if len(_clients) == 1:
+        search = _clients[0]
+    else:
+        from app.clients.search.multi import MultiProviderSearchClient
+        search = MultiProviderSearchClient(_clients)
 
     from app.agent.fetcher import Fetcher
     from app.agent.searcher import Searcher

@@ -19,14 +19,6 @@ from app.provenance.tracker import ProvenanceTracker
 from app.security import wrap_external  # noqa: F401  (re-exported for tests)
 
 log = logging.getLogger(__name__)
-# diagnostica cicli: attiva con DR_DEBUG=1 (default OFF in produzione)
-diag = logging.getLogger("dr.diag")
-if not diag.handlers:
-    _dh = logging.StreamHandler()
-    _dh.setFormatter(logging.Formatter("%(name)s: %(message)s"))
-    diag.addHandler(_dh)
-    diag.propagate = False
-    diag.setLevel(logging.DEBUG if __import__("os").environ.get("DR_DEBUG") else logging.CRITICAL + 1)
 
 _DEPTH_SUBQ = {Depth.RAPIDA: 3, Depth.STANDARD: 4, Depth.APPROFONDITA: 6}
 _MAX_EVIDENCES_PER_CYCLE = 60
@@ -95,6 +87,23 @@ class Orchestrator:
         self.bus.publish(Event(type=type_, run_id=self.run_id, cycle=cycle,
                                payload=payload))
 
+    def _snowball_queries(self, cycle: int, seen_urls: set[str]):
+        """B4: i candidate snowball diventano query "site-direct" (URL fetch).
+
+        Priorità bassissima: entrano DOPO gen_queries e gap_new_queries e solo
+        finché c'è posto sotto max_queries_per_cycle.
+        """
+        from app.models import GeneratedQuery
+        from app.security import normalize_for_dedupe
+        seen_norm = {normalize_for_dedupe(u) for u in seen_urls}
+        out = []
+        for url in self._snowball.take_pending(seen_norm):
+            out.append(GeneratedQuery(
+                query_id=f"{self.run_id[:24]}_sb{cycle}_{len(out) + 1}",
+                subquestion_id="", text=url, cycle=cycle))
+            seen_norm.add(normalize_for_dedupe(url))
+        return out
+
     # ---------- run ----------
     async def run(self, question: str, language: str, depth: Depth, run_id: str,
                   cancel: asyncio.Event) -> RunOutcome:
@@ -107,14 +116,20 @@ class Orchestrator:
         budget = RuntimeBudget(max_runtime_seconds=self.settings.max_runtime_seconds,
                                max_total_pages=self.settings.max_total_pages)
         seen_urls: set[str] = set()  # never re-pick pages already read
-        # TEMP FASE A: diagnostica cicli
         effective = self.settings.cycle_budget(depth)
-        diag.info(
+        log.debug(
             "[CYCLES] depth=%s | DR_MAX_CYCLES=%s | preset=%s | EFFETTIVO=%s "
             "(min dei due) | max_total_pages=%s | max_runtime=%ss",
             depth.value, self.settings.max_cycles, _DEPTH_SUBQ.get(depth),
             effective, self.settings.max_total_pages, self.settings.max_runtime_seconds)
         shared_state = SearchState()
+        # B4: candidate URL da snowballing (link citati dalle fonti accettate)
+        from app.agent.snowball import SnowballState
+        self._snowball = SnowballState()
+        # B5: budget tempo per ciclo (0 = disattivo) + token/step per ciclo
+        per_cycle_s = getattr(self.settings, "max_seconds_per_cycle", 0) or 0
+        cycle_deadline = [0.0]
+        cycle_tokens_start = [0]
         stop_reason: str = "MAX_CICLI"  # default when the loop ends naturally
         stop_detail: str = ""
         domain_by_source: dict[str, str] = {}
@@ -125,6 +140,7 @@ class Orchestrator:
         evidences = []
         subquestions: list[SubQuestion] = []
         accepted_docs = []
+        accepted: list = []  # per-cycle; definita anche quando `items` è vuoto
         report_md = ""
         report_claims = []
         self._stats = {"sources": 0, "evidences": 0}
@@ -134,7 +150,7 @@ class Orchestrator:
 
         try:
             for cycle in range(1, self.settings.cycle_budget(depth) + 1):
-                diag.info("[CICLO %s] avvio (max=%s)", cycle, effective)
+                log.debug("[CICLO %s] avvio (max=%s)", cycle, effective)
                 if cancel.is_set():
                     status = "cancelled"
                     stop_reason, stop_detail = "ANNULLATO", "richiesta utente"
@@ -146,14 +162,27 @@ class Orchestrator:
                     stop_reason, stop_detail = "LIMITE_TEMPO", str(exc)
                     break
                 self._cycle = cycle
-                self.emit("cycle_started", cycle)
+                # B4: ruolo del ciclo nel payload (esplorazione/approfondimento/verifica)
+                from app.agent.search_state import cycle_role as _cycle_role
+                self.emit("cycle_started", cycle, role=_cycle_role(cycle))
+                # B5: deadline di ciclo + snapshot token a inizio ciclo
+                cycle_deadline[0] = (time.monotonic() + per_cycle_s
+                                     if per_cycle_s > 0 else 0.0)
+                cycle_tokens_start[0] = (getattr(self.llm, "tokens_in", 0)
+                                         + getattr(self.llm, "tokens_out", 0))
+                self._cycle_tokens_in = 0
+                self._cycle_tokens_out = 0
 
                 # ---- planning (first cycle only) ----
                 if plan is None:
                     self.emit("planning_started", cycle,
                           note="Il bot sta analizzando la domanda e scegliendo le pagine")
+                    # B5: la lingua del piano segue la lingua GLOBALE del report,
+                    # non la lingua della domanda (coerenza titolo/sotto-domande/report)
+                    plan_lang = (self.settings.report_language
+                                 or language or "it").strip() or "it"
                     plan = await self.planner.make_plan(
-                        question, language,
+                        question, plan_lang,
                         max_subquestions=_DEPTH_SUBQ[depth])
                     # ids are only unique within a plan: prefix with run_id
                     # (SQLite PKs are table-global, runs share the DB)
@@ -192,7 +221,8 @@ class Orchestrator:
                     all_q = (gen_queries
                              + [_as_query(self.run_id, q.subquestion_id, q.text,
                                           cycle, i)
-                                for i, q in enumerate(gap_new_queries)])
+                                for i, q in enumerate(gap_new_queries)]
+                             + self._snowball_queries(cycle, seen_urls))
                     seen_texts = set()
                     queries = []
                     for q in all_q:
@@ -205,26 +235,30 @@ class Orchestrator:
                     queries = queries[:self.settings.max_queries_per_cycle]
                     for q in queries:
                         shared_state.see_query(q.text)
-                diag.info("[CICLO %s/%s] query: %s", cycle, effective,
+                log.debug("[CICLO %s/%s] query: %s", cycle, effective,
                           [q.text for q in queries])
                 self.emit("query_started", cycle, count=len(queries))
                 items = await self.searcher.run_queries(
                     queries, self.settings.max_pages_per_query)
                 items = [it for it in items
                          if it.url not in seen_urls]  # no re-reads across cycles
+                # B4: scala di novità — prima i dominio-nuovi, poi i già-visti
+                from app.agent.search_state import novelty_score as _novelty
+                items.sort(key=lambda it: _novelty(it.url, shared_state),
+                           reverse=True)
                 domains = {}
                 for it in items:
                     from urllib.parse import urlsplit
                     d = (urlsplit(it.url).hostname or "?")
                     domains[d] = domains.get(d, 0) + 1
-                diag.info("[CICLO %s] risultati DOPO filtro seen_urls: %s | domini: %s",
+                log.debug("[CICLO %s] risultati DOPO filtro seen_urls: %s | domini: %s",
                           cycle, len(items), domains)
                 new_urls = len(items)
                 self.emit("search_result_found", cycle, count=len(items))
                 t_search = time.perf_counter() - _t_search
                 self._timings.append({"cycle": cycle, "step": "search",
                                       "s": round(t_search, 1)})
-                diag.info("[TEMPI] ciclo %s search=%.1fs", cycle, t_search)
+                log.debug("[TEMPI] ciclo %s search=%.1fs", cycle, t_search)
                 self._maybe_emit_usage()
                 if items:
                     _t_fetch = time.perf_counter()
@@ -246,10 +280,17 @@ class Orchestrator:
                             self.emit("source_failed", cycle, source_id=doc.source_id,
                                       url=doc.url, error=doc.error)
                     accepted = await self._evaluate_docs(run_id, cycle, docs, question)
+                    # B4: snowballing — link citati dalle pagine accettate
+                    from app.agent.snowball import extract_links as _xlinks
+                    for doc in accepted:
+                        for u in _xlinks(doc.text[:8000],
+                                         base_url=doc.final_url or doc.url,
+                                         max_links=10):
+                            self._snowball.propose(u)
                     t_fetch = time.perf_counter() - _t_fetch
                     self._timings.append({"cycle": cycle, "step": "fetch+judge",
                                           "s": round(t_fetch, 1)})
-                    diag.info("[TEMPI] ciclo %s fetch+judge=%.1fs", cycle, t_fetch)
+                    log.debug("[TEMPI] ciclo %s fetch+judge=%.1fs", cycle, t_fetch)
                     accepted_docs.extend(accepted)
                     _t_read = time.perf_counter()
                     new_evs = await self._read_docs(question, cycle, accepted, subquestions)
@@ -257,16 +298,26 @@ class Orchestrator:
                     self._stats["evidences"] += len(new_evs)
                     self._timings.append({"cycle": cycle, "step": "read(LLM)",
                                           "s": round(time.perf_counter() - _t_read, 1)})
-                    diag.info("[TEMPI] ciclo %s read=%.1fs", cycle,
+                    log.debug("[TEMPI] ciclo %s read=%.1fs", cycle,
                               time.perf_counter() - _t_read)
                     self.emit("evidence_extracted", cycle, count=len(new_evs),
                               total=len(evidences))
                     self._maybe_emit_usage()
+                    # B5: check deadline per-ciclo (subito dopo il primo step pesante)
+                    if cycle_deadline[0] and time.monotonic() > cycle_deadline[0]:
+                        limit_note = (limit_note or
+                                      f"max_seconds_per_cycle={per_cycle_s} al ciclo {cycle}")
+                        stop_reason, stop_detail = "LIMITE_CICLO", (
+                            f"budget per ciclo esaurito: {per_cycle_s}s al ciclo {cycle}")
+                        log.debug("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
+                        self.emit("cycle_completed", cycle, complete=True,
+                                  stop_reason=stop_reason, stop_detail=stop_detail)
+                        break
 
-                if cancel.is_set():
-                    status = "cancelled"
-                    stop_reason, stop_detail = "ANNULLATO", "richiesta utente"
-                    break
+                    if cancel.is_set():
+                        status = "cancelled"
+                        stop_reason, stop_detail = "ANNULLATO", "richiesta utente"
+                        break
 
                 # ---- gap check (coverage decided in code) ----
                 _t_gap = time.perf_counter()
@@ -278,14 +329,14 @@ class Orchestrator:
                 report = await self.gap_checker.check(question, subquestions,
                                                       evidences,
                                                       domain_of=domain_by_source)
-                diag.info("[CICLO %s] GAP complete=%s status=%s", cycle,
+                log.debug("[CICLO %s] GAP complete=%s status=%s", cycle,
                           report.complete, report.status_by_id)
                 gap_new_queries = list(report.new_queries)
                 report_status_by_id = dict(report.status_by_id)
                 report_covered_ids = set(report.covered_subquestions)
                 self._timings.append({"cycle": cycle, "step": "gap_check(LLM)",
                                       "s": round(time.perf_counter() - _t_gap, 1)})
-                diag.info("[TEMPI] ciclo %s gap=%.1fs", cycle,
+                log.debug("[TEMPI] ciclo %s gap=%.1fs", cycle,
                           time.perf_counter() - _t_gap)
 
                 # ---- UNIQUE termination point ----
@@ -295,7 +346,7 @@ class Orchestrator:
                     new_domains=len({d for d in domains}),
                     shared_state=shared_state)
                 if stop:
-                    diag.info("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
+                    log.debug("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
                     self.emit("cycle_completed", cycle, complete=True,
                               stop_reason=stop_reason, stop_detail=stop_detail)
                     break
@@ -311,7 +362,7 @@ class Orchestrator:
             if evidences and not cancel.is_set():
                 t_write = time.perf_counter()
                 out_lang = self.settings.report_language or language
-                diag.info("[WRITER] language=%s | evidenze totali=%s",
+                log.debug("[WRITER] language=%s | evidenze totali=%s",
                           out_lang, len(evidences))
                 self.emit("writing_started", 0,
                           note="Il bot sta ragionando su come impostare il report")
@@ -332,7 +383,7 @@ class Orchestrator:
                     draft = await self.writer.write(
                         question, out_lang, subquestions, evidences,
                         limit_note=limit_note)
-                diag.info("[WRITER] completato in %.1fs (rigenerazioni=%s, "
+                log.debug("[WRITER] completato in %.1fs (rigenerazioni=%s, "
                           "italiano=%s)", time.perf_counter() - t_write, attempts,
                           looks_italian(draft.markdown))
                 for c in draft.claims:
@@ -397,6 +448,12 @@ class Orchestrator:
         )
         self.storage.finish_run(run_id, status, error,
                                 bool(limit_note), limit_note)
+        # B5: stats (incl. per_cycle) persistite nel run per ispezione UI/API
+        try:
+            self.storage._exec("UPDATE runs SET limits_json=? WHERE id=?",
+                               (json.dumps(stats, ensure_ascii=False), run_id))
+        except Exception:
+            pass
         self.emit("run_completed" if status == "completed" else
                   ("run_cancelled" if status == "cancelled" else "run_failed"),
                   0, status=status, limit_note=limit_note)
@@ -409,6 +466,14 @@ class Orchestrator:
             "stop_detail": stop_detail,
             "timings": self._timings,
         }
+        # B5: tabella token/step per ciclo (aggregata dai timing + contatori LLM)
+        by_cycle: dict[int, dict[str, float]] = {}
+        for row in self._timings:
+            c = by_cycle.setdefault(row["cycle"], {"seconds": 0.0})
+            c["seconds"] += row.get("s", 0.0)
+        for cyc, agg in sorted(by_cycle.items()):
+            agg["steps"] = sum(1 for r in self._timings if r["cycle"] == cyc)
+        stats["per_cycle"] = by_cycle
         usage = self.storage.usage_for_run(run_id) or {}
         stats["llm_calls"] = getattr(self.llm, "llm_calls", 0)
         stats["llm_tokens_in"] = getattr(self.llm, "tokens_in", 0)
