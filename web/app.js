@@ -87,16 +87,19 @@ function openStream(runId) {
   };
 }
 
-/* B1: banner "Server non raggiungibile" + riconnessione automatica */
+/* B1: banner "Server non raggiungibile" + riconnessione automatica.
+   B1-fix: il banner distingue "in avvio" (warm-up Laya) da "giu'" vero. */
 let _healthTimer = null;
-function showServerBanner(show) {
+function showServerBanner(show, starting = false) {
   let b = $("server-banner");
   if (show && !b) {
     b = document.createElement("div");
     b.id = "server-banner";
     b.className = "server-banner";
-    b.innerHTML = "Server non raggiungibile. " +
-      '<button id="retry-btn" class="hbtn">Riprova</button>';
+    b.innerHTML = (starting
+      ? "Server in avvio (caricamento modelli, ~30s)..."
+      : "Server non raggiungibile.") +
+      ' <button id="retry-btn" class="hbtn">Riprova</button>';
     document.body.prepend(b);
     $("retry-btn").addEventListener("click", () => location.reload());
     _healthTimer = setInterval(async () => {
@@ -711,6 +714,19 @@ async function startRun(e) {
   e.preventDefault();
   const question = $("question").value.trim();
   if (!question) return;
+  /* B1-fix: un solo run alla volta + server pronto (evita run duplicati
+     cliccando Avvia durante il warm-up) */
+  if (state.status === "running") { toast("Un run e' gia' in corso"); return; }
+  const btn = $("start-btn");
+  btn.disabled = true;
+  try {
+    const h = await fetch("/api/health");
+    if (!h.ok) throw new Error("server non pronto");
+  } catch {
+    showServerBanner(true, true);
+    btn.disabled = false;
+    return;
+  }
   const body = {
     question,
     depth: $("depth").value,
@@ -731,6 +747,8 @@ async function startRun(e) {
     refreshHistory();
   } catch (err) {
     toast(`Avvio fallito: ${err.message}`);
+  } finally {
+    btn.disabled = false;
   }
 }
 
