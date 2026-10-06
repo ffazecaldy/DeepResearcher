@@ -71,15 +71,17 @@ html[data-theme="light"] .btn.pri{color:#fffaf0}
    min-height (cresceva col contenuto): pagina lunga e report che sparisce
    sotto la piega. */
 .work{display:flex;height:calc(100vh - 45px);background:var(--bg);overflow:hidden}
+/* B1-fix4b: la colonna centrale NON scrolla lei (farebbe sparire lo statusbar);
+   sono i pannelli interni (Attivita, Report) a farsi spazio con flex-shrink */
+.col-center{flex:1 1 auto;min-width:0;min-height:0;overflow:hidden}
 .col{display:flex;flex-direction:column;gap:8px;padding:8px;min-width:0;min-height:0}
 /* B1-fix3: altezza DEFINITA (non max-height): con max-height il flex non
    restringe i pannelli e la colonna intera scrolla quando la cronologia si
    popola (il form sfila via, doppia scrollbar). Con height fissa il pannello
    cronologia si contrae e la lista scrolla DENTRO il pannello. */
 .col-left{width:var(--w-left,280px);flex:none;height:100%;overflow:hidden;transition:width .12s}
-.col-center{flex:1 1 auto;min-height:0;overflow-y:auto}
 .col-right{width:var(--w-right,300px);flex:none;height:100%;overflow-y:auto;transition:width .12s}
-.col-center.c-w{width:var(--w-center,60%);flex:none}
+.col-center.c-w{width:var(--w-center,60%);flex:none;min-height:0}
 @media (max-width:900px){
   .work{flex-direction:column;height:auto;overflow:visible}
   .col-left,.col-right{width:100%;height:auto;max-height:none;overflow:visible}
@@ -90,9 +92,11 @@ html[data-theme="light"] .btn.pri{color:#fffaf0}
 /* ── pannello generico ──────────────────────────────────────────────────── */
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:5px;
   display:flex;flex-direction:column;overflow:hidden}
-/* B1-fix4: il report torna ad avere un'altezza propria (il pannello grow lo
-   limita); con pannelli in colonna flex auto-altezza + min-height:0 */
-.panel.grow{flex:1 1 auto;min-height:160px;max-height:100%}
+/* B1-fix4b: i pannelli .grow DEVONO poter restringersi (flex-shrink di default
+   =1) ma senza min-height bloccano il layout al loro content-height: ecco il
+   min-height piccolo ma non-zero, cosi' il flex li comprime davvero e la lista
+   interna scrolla. */
+.panel.grow{flex:1 1 auto;min-height:120px}
 .ph{height:27px;flex:none;display:flex;align-items:center;gap:7px;padding:0 8px;
   background:var(--panel2);border-bottom:1px solid var(--line2)}
 .ph .ttl{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
