@@ -23,6 +23,8 @@ const state = {
   failedChecks: 0,
   lastSeq: null,
   runId: null,
+  activeRunId: null,       // B1-fix2: run avviato da QUESTA pagina (in corso)
+  observedOther: false,    // B1-fix2: stiamo vedendo un run diverso dall'attivo
   status: "idle",          // idle|loading|running|completed|failed|cancelled
   startedAt: null,
   cycle: null,
@@ -81,15 +83,23 @@ function openStream(runId) {
   types.forEach((t) => es.addEventListener(t, (e) => {
     try { handleEvent(JSON.parse(e.data)); } catch (err) { console.error(err); }
   }));
-  /* B1: su errore persistente mostra banner; /api/health ogni 5s per ricollegare */
+  /* B1: su errore persistente mostra banner; /api/health ogni 5s per ricollegare.
+     B1-fix2: un singolo errore SSE NON e' "server giu'" (EventSource riconnette
+     da solo): il banner parte solo dopo errori consecutivi, e la riconnessione
+     NON fa piu' location.reload() durante un run (cancellava la vista live). */
   es.onerror = () => {
-    if (state.status === "running") showServerBanner(true);
+    _sseErrStreak += 1;
+    if (_sseErrStreak >= 3 && state.status === "running") showServerBanner(true);
   };
+  es.onopen = () => { _sseErrStreak = 0; };
 }
 
 /* B1: banner "Server non raggiungibile" + riconnessione automatica.
-   B1-fix: il banner distingue "in avvio" (warm-up Laya) da "giu'" vero. */
+   B1-fix: il banner distingue "in avvio" (warm-up Laya) da "giu'" vero.
+   B1-fix2: mai reload automatico durante un run — il poller health, quando il
+   server torna, riacchiappa la vista live via SSE invece di ricaricare. */
 let _healthTimer = null;
+let _sseErrStreak = 0;
 function showServerBanner(show, starting = false) {
   let b = $("server-banner");
   if (show && !b) {
@@ -105,7 +115,13 @@ function showServerBanner(show, starting = false) {
     _healthTimer = setInterval(async () => {
       try {
         const r = await fetch("/api/health");
-        if (r.ok) { location.reload(); }
+        if (r.ok) {
+          if (_healthTimer) { clearInterval(_healthTimer); _healthTimer = null; }
+          b.remove();
+          // il run (se in corso) continua lato server: riprendiamo lo stream
+          // senza reload, cosi' la vista non si azzera
+          if (state.runId) { _sseErrStreak = 0; openStream(state.runId); }
+        }
       } catch { /* ancora giu' */ }
     }, 5000);
   } else if (!show && b) {
@@ -315,6 +331,8 @@ function handleEvent(ev) {
   if (type === "run_completed") {
     // B1: "completata con N avvisi" quando ci sono verifiche fallite
     finishRun(state.failedChecks ? "completed-warnings" : "completed");
+    // B1-fix2: il run attivo e' finito — torniamo in modalita' normale
+    if (state.runId === state.activeRunId) state.activeRunId = null;
   }
   if (type === "claim_failed") {
     state.failedChecks = (state.failedChecks || 0) + 1;
@@ -575,8 +593,19 @@ async function refreshHistory() {
   }
 }
 
-async function loadRun(runId) {
-  if (state.status === "running") { toast("Interrompi il run corrente prima."); return; }
+async function loadRun(runId, opts = {}) {
+  /* B1-fix2: la cronologia e' cliccabile SEMPRE. Se un run e' in corso e si
+     clicca un altro run, si entra in modalita' "osserva" (sola lettura): il
+     run attivo continua lato server e si puo' tornare a vederlo dalla lista. */
+  const viewingActive = state.runId === runId;
+  if (state.status === "running" && !viewingActive && !opts.force) {
+    toast("Run in corso: apri un altro run in osservazione (il run attivo continua).");
+  }
+  if (state.status === "running" && !viewingActive) {
+    state.observedOther = true;   // stiamo guardando un run diverso da quello attivo
+  } else {
+    state.observedOther = false;
+  }
   resetPanels();
   state.runId = runId;
   state.reportJson = null;
@@ -595,14 +624,16 @@ async function loadRun(runId) {
       state.counters.tokens =
         (detail.usage.llm_tokens_in || 0) + (detail.usage.llm_tokens_out || 0);
     }
-    setStatus(run.status || "completed");
+    // B1-fix2: non toccare lo stato "running" del run attivo quando guardi un altro
+    const isActiveRun = state.activeRunId && runId === state.activeRunId;
+    setStatus(isActiveRun ? "running" : (run.status || "completed"));
     state.startedAt = run.started_at ? run.started_at * 1000 : null;
     tickTime();
     listenEvents(runId); // replay + chiusura
     updateStatusbar();
   } catch (e) {
     toast(`Errore caricamento: ${e.message}`);
-    setStatus("idle");
+    setStatus(state.activeRunId ? "running" : "idle");
   }
 }
 
@@ -740,6 +771,8 @@ async function startRun(e) {
     });
     resetPanels();
     state.runId = resp.run_id;
+    state.activeRunId = resp.run_id;  // B1-fix2: run avviato qui = run attivo
+    state.observedOther = false;
     setStatus("running");
     if (state.timer) clearInterval(state.timer);
     state.timer = setInterval(tickTime, 1000);
