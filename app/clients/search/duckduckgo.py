@@ -91,13 +91,23 @@ class DuckDuckGoSearchClient:
         )
 
     async def search(self, query: str, max_results: int) -> list[SearchResultItem]:
-        try:
-            resp = await self._http.post(_ENDPOINT, data={"q": query})
-        except httpx.HTTPError as exc:
-            raise SearchApiError(f"duckduckgo: {exc}") from exc
-        if resp.status_code != 200:
-            raise SearchApiError(f"duckduckgo: http {resp.status_code}")
-        return _parse_results(resp.text, max_results)
+        # B1-fix5: DDG html risponde 202 con body vuoto quando rate-limita
+        # (soft-block keyless). 2 retry con backoff: spesso al 2o tenta passa.
+        last = ""
+        for attempt in (1, 2, 3):
+            try:
+                resp = await self._http.post(_ENDPOINT, data={"q": query})
+            except httpx.HTTPError as exc:
+                raise SearchApiError(f"duckduckgo: {exc}") from exc
+            if resp.status_code == 200:
+                return _parse_results(resp.text, max_results)
+            last = f"http {resp.status_code}"
+            if resp.status_code in (202, 429, 403):
+                import asyncio as _a
+                await _a.sleep(1.5 * attempt)  # backoff crescente
+                continue
+            raise SearchApiError(f"duckduckgo: {last}")
+        raise SearchApiError(f"duckduckgo: {last} (rate-limit dopo 3 tentativi)")
 
     async def aclose(self) -> None:
         await self._http.aclose()

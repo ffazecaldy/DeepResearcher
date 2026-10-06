@@ -409,6 +409,14 @@ class Orchestrator:
                 report_md = _final_markdown(draft.title, draft.markdown,
                                             verified.claims, evidences, src_map)
                 report_claims = verified.claims
+            elif not evidences and not cancel.is_set():
+                # B1-fix5: zero evidenze (es. search provider rate-limitato) ->
+                # il run finiva "completed" senza report e senza spiegazione.
+                # Stato onesto: failed con errore leggibile in UI.
+                status = "failed"
+                error = ("nessuna evidenza raccolta: il motore di ricerca non ha "
+                         "restituito risultati (provider rate-limitato o offline?)")
+                self.emit("run_failed", 0, error=error)
             elif cancel.is_set():
                 status = "cancelled"
         except LimitReached as exc:
