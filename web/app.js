@@ -209,8 +209,12 @@ function addActivity(type, cycle, payload) {
   const cyc = cycle ? `<span class="ev-cycle mono">c${cycle}</span>` : "";
   li.innerHTML = `${ic}${cyc}<span class="ev-text">${escapeHtml(sentence)}</span>`;
   const list = $("activity");
+  // B1-fix3: prepend solo se l'utente è in cima (vista live); se ha scrollato
+  // nel passato, l'evento si accoda senza strappare la posizione
+  const pinnedTop = list.scrollTop <= 2;
   list.prepend(li);
   while (list.children.length > 300) list.removeChild(list.lastChild);
+  if (!pinnedTop) list.scrollTop = list.scrollTop + li.offsetHeight;
   const fc = $("feed-count");
   if (fc) {
     const n = list.children.length;
@@ -556,20 +560,25 @@ function closePopover() {
 }
 
 /* ============================== history ============================== */
+/* B1-fix3: la lista non viene più svuotata e ricostruita da zero a ogni
+   refresh (perdeva la posizione di scroll e faceva "saltare" la colonna):
+   si aggiornano solo le righe cambiate, l'ordine resta stabile. */
 async function refreshHistory() {
-  const runs = await apiJson("/api/runs");
+  let runs;
+  try { runs = await apiJson("/api/runs"); } catch { return; }  // server giù: niente bounce
   const ul = $("history-list");
-  ul.innerHTML = "";
-  const n = Math.min(runs.length, 30);
   const hc = $("history-count");
-  if (hc) hc.textContent = String(n);
+  const n = Math.min(runs.length, 30);
+  if (hc) hc.textContent = String(runs.length);
+  const existing = new Map(Array.from(ul.children)
+    .map((li) => [li.dataset.runId, li]));
+  const seen = new Set();
   for (const r of runs.slice(0, 30)) {
-    const li = document.createElement("li");
-    if (r.id === state.runId) li.className = "active";
+    seen.add(r.id);
     const date = r.started_at
       ? new Date(r.started_at * 1000).toLocaleString("it-IT",
         { dateStyle: "short", timeStyle: "short" }) : "";
-    li.innerHTML =
+    const html =
       `<div class="q">${escapeHtml(String(r.question).slice(0, 90))}</div>` +
       `<div class="meta"><span class="badge ${escapeHtml(r.status)}">` +
       `${escapeHtml(r.status)}</span><span>${escapeHtml(date)}</span>` +
@@ -583,14 +592,40 @@ async function refreshHistory() {
       `<button data-del="${r.id}" aria-label="Elimina run">` +
       `${icon("trash", "ic s12")}</button>` +
       `</span></div>`;
-    li.addEventListener("click", (e) => {
-      if (e.target.closest("[data-del]")) return;
-      loadRun(r.id);
-    });
-    li.querySelector("[data-del]").addEventListener("click",
-      () => deleteRun(r.id));
-    ul.appendChild(li);
+    let li = existing.get(r.id);
+    if (li) {
+      // aggiorna solo se qualcosa è cambiato (niente flicker/scroll-jump)
+      if (li.dataset.sig !== `${r.status}|${date}`) {
+        li.innerHTML = html;
+        li.dataset.sig = `${r.status}|${date}`;
+        wireHistoryItem(li, r);
+      }
+    } else {
+      li = document.createElement("li");
+      li.dataset.runId = r.id;
+      li.dataset.sig = `${r.status}|${date}`;
+      li.innerHTML = html;
+      wireHistoryItem(li, r);
+      // inserimento in posizione (la lista è ordinata come l'API: più recente prima)
+      const anchor = ul.children[Math.min(runs.slice(0, 30).indexOf(r), ul.children.length)];
+      if (anchor && anchor !== li) ul.insertBefore(li, anchor);
+      else if (!anchor) ul.appendChild(li);
+    }
+    li.classList.toggle("active", r.id === state.runId);
   }
+  // rimuovi le righe di run non più esistenti (eliminati)
+  for (const [id, li] of existing) {
+    if (!seen.has(id)) li.remove();
+  }
+}
+
+function wireHistoryItem(li, r) {
+  li.onclick = (e) => {
+    if (e.target.closest("[data-del]")) return;
+    loadRun(r.id);
+  };
+  const del = li.querySelector("[data-del]");
+  if (del) del.onclick = () => deleteRun(r.id);
 }
 
 async function loadRun(runId, opts = {}) {
