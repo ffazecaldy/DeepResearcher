@@ -66,29 +66,32 @@ body{background:var(--bg);color:var(--txt);font-family:var(--disp);font-size:13p
 html[data-theme="light"] .btn.pri{color:#fffaf0}
 
 /* ── corpo a 3 colonne ──────────────────────────────────────────────────── */
-.work{display:flex;min-height:calc(100vh - 45px);background:var(--bg)}
-.col{display:flex;flex-direction:column;gap:8px;padding:8px;min-width:0}
+/* B1-fix4: layout ad ALTEZZA FISSA (app-style): .work occupa esattamente il
+   viewport, ogni colonna gestisce il proprio scroll interno. Prima .work era
+   min-height (cresceva col contenuto): pagina lunga e report che sparisce
+   sotto la piega. */
+.work{display:flex;height:calc(100vh - 45px);background:var(--bg);overflow:hidden}
+.col{display:flex;flex-direction:column;gap:8px;padding:8px;min-width:0;min-height:0}
 /* B1-fix3: altezza DEFINITA (non max-height): con max-height il flex non
    restringe i pannelli e la colonna intera scrolla quando la cronologia si
    popola (il form sfila via, doppia scrollbar). Con height fissa il pannello
    cronologia si contrae e la lista scrolla DENTRO il pannello. */
-.col-left{width:var(--w-left,280px);flex:none;height:calc(100vh - 61px);overflow:hidden;transition:width .12s}
-.col-center{flex:1 1 auto;transition:width .12s}
-.col-right{width:var(--w-right,300px);flex:none;height:calc(100vh - 61px);overflow:hidden;transition:width .12s}
+.col-left{width:var(--w-left,280px);flex:none;height:100%;overflow:hidden;transition:width .12s}
+.col-center{flex:1 1 auto;min-height:0;overflow-y:auto}
+.col-right{width:var(--w-right,300px);flex:none;height:100%;overflow-y:auto;transition:width .12s}
 .col-center.c-w{width:var(--w-center,60%);flex:none}
 @media (max-width:900px){
-  .work{flex-direction:column}
+  .work{flex-direction:column;height:auto;overflow:visible}
   .col-left,.col-right{width:100%;height:auto;max-height:none;overflow:visible}
-  .col-center{width:100%!important;flex:none}
+  .col-center{width:100%!important;flex:none;overflow:visible}
   .resizers{display:none}
 }
 
 /* ── pannello generico ──────────────────────────────────────────────────── */
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:5px;
   display:flex;flex-direction:column;overflow:hidden}
-/* B1-fix3: min-height:0 + max-height nei pannelli .grow dentro flex column:
-   senza min-height:0 il contenuto (activity/report) spinge il pannello oltre
-   la colonna e il layout "scatta" quando arriva il feed */
+/* B1-fix4: il report torna ad avere un'altezza propria (il pannello grow lo
+   limita); con pannelli in colonna flex auto-altezza + min-height:0 */
 .panel.grow{flex:1 1 auto;min-height:160px;max-height:100%}
 .ph{height:27px;flex:none;display:flex;align-items:center;gap:7px;padding:0 8px;
   background:var(--panel2);border-bottom:1px solid var(--line2)}
@@ -288,7 +291,8 @@ li.cat-error .ev-ic{color:var(--loss)}
 li.cat-success .ev-ic{color:var(--gain)}
 
 /* ── report ─────────────────────────────────────────────────────────────── */
-/* B1-fix3: max-height in vh rimosso, stessa ragione del feed attività */
+/* B1-fix4: il report scrolla DENTRO il suo pannello (che ora ha altezza
+   determinata dalla colonna a viewport fisso), non serve un limite vh */
 .report{overflow-y:auto;min-height:0;flex:1;font-size:13px;line-height:1.6}
 .report p{margin:6px 0}
 .report h1{font-size:19px;margin:12px 0 6px;letter-spacing:-.01em}
