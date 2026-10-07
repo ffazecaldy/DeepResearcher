@@ -143,9 +143,12 @@ class ReportClaim(BaseModel):
     text: str
     citation_no: int
     evidence_ids: list[str] = Field(default_factory=list)
+    source_span: str | None = None
+    quote: str | None = None
     verdict: Verdict | None = None
     verdict_reason: str | None = None
     corrected_text: str | None = None
+    final_citation_no: int | None = None  # P0-2: numero uniforme post-verifica
 
 
 class DraftReport(BaseModel):
@@ -160,6 +163,7 @@ class VerificationStats(BaseModel):
     number_corrected: int = 0
     number_removed: int = 0
     number_failed: int = 0
+    number_uncovered: int = 0  # frasi fattuali non coperte da alcun claim (P0-3)
 
 
 class VerifiedReport(BaseModel):

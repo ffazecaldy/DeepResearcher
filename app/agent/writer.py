@@ -117,8 +117,7 @@ class Writer:
         markdown = re.sub(r"^\s*#\s+[^\n]+\n+", "", markdown)
         title = str(data.get("title", "")).strip() or question.strip()
         if limit_note:
-            markdown += (f"\n\n> Nota: ricerca interrotta per limite raggiunto "
-                         f"— {limit_note}\n")
+            markdown += (f"\n\n> Nota: {limit_note}\n")
         return DraftReport(title=title, markdown=markdown, claims=claims)
 
     async def _ask(self, system_tpl: str, user: str) -> dict:

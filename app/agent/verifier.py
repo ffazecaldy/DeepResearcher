@@ -62,8 +62,23 @@ def _remove_claim(markdown: str, claim_text: str) -> str | None:
 
 
 def _numbers(text: str) -> set[str]:
-    """Normalized numeric tokens (int/decimal, comma or dot)."""
+    """Normalized numeric TOKENS (int/decimal, comma or dot) — token-boundary
+    aware: '20' in 'nel 2020' is 2020's token, not 20 (P0-3 fix)."""
     return {m.group(0).replace(",", ".") for m in _NUMBER_RE.finditer(text)}
+
+
+def _num_tokens(text: str) -> set[str]:
+    """Number tokens with word boundaries: '20' does NOT match inside '2020'
+    or '1.20' (percentages like 3,5 are one token)."""
+    out: set[str] = set()
+    for m in re.finditer(r"\d+(?:[.,]\d+)?", text):
+        s, e = m.span()
+        before = text[s - 1] if s > 0 else " "
+        after = text[e] if e < len(text) else " "
+        if before.isdigit() or after.isdigit():
+            continue  # this match is a slice of a longer number
+        out.add(m.group(0).replace(",", "."))
+    return out
 
 
 def _norm_md(s: str) -> str:
@@ -149,11 +164,15 @@ class Verifier:
 
     def _unsupported_numbers(self, claim: ReportClaim,
                              ev_map: dict[str, Evidence]) -> set[str]:
-        quoted = " ".join(
-            (ev_map[eid].quote + " " + ev_map[eid].claim)
+        """Numbers in the claim not present in the cited evidence texts.
+        Token-boundary aware; evidence text = quote + generated summary
+        (both: the summary can paraphrase numbers absent from the quote)."""
+        quoted = " \n".join(
+            (ev_map[eid].quote + " \n" + ev_map[eid].claim)
             for eid in claim.evidence_ids if eid in ev_map
         ).lower()
-        return {n for n in _numbers(claim.text) if n not in quoted}
+        quoted_tokens = _num_tokens(quoted)
+        return {n for n in _num_tokens(claim.text) if n not in quoted_tokens}
 
     async def _llm_verdict(self, system_tpl: str, user_tpl: str,
                            question: str, claim: ReportClaim,
@@ -180,7 +199,6 @@ class Verifier:
                      sources: dict[str, FetchedDocument]) -> VerifiedReport:
         system_tpl, user_tpl = self._load()
         markdown = draft.markdown
-
         async def one(claim: ReportClaim) -> ReportClaim:
             nonlocal markdown
             if not claim.evidence_ids or any(e not in ev_map for e in claim.evidence_ids):
@@ -260,4 +278,18 @@ class Verifier:
                 stats.number_removed += 1
             else:
                 stats.number_failed += 1  # WEAKENED counted as failed-check too
+
+        # ---- P0-3: text -> claim coverage (every factual sentence must be a
+        # claim). Sentences in the final markdown not matched by any claim are
+        # flagged inline and counted; no silent unverified prose survives.
+        from app.agent.coverage import uncovered_sentences, mark_uncovered
+        covered_texts = {c.text for c in claims} | {
+            c.corrected_text for c in claims if c.corrected_text}
+        uncovered = uncovered_sentences(markdown, covered_texts)
+        stats.number_uncovered = len(uncovered)
+        markdown = mark_uncovered(markdown, uncovered)
+
+        # ---- P0-2: unified citation numbering on the VERIFIED text ----
+        from app.agent.citations import renumber_citations
+        markdown, claims = renumber_citations(markdown, claims)
         return VerifiedReport(markdown=markdown, claims=claims, stats=stats)

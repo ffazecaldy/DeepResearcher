@@ -368,7 +368,8 @@ class Orchestrator:
                           note="Il bot sta ragionando su come impostare il report")
                 self._maybe_emit_usage()
                 await asyncio.sleep(0.8)  # cede il loop: la UI vede la fase
-                limit_note = (limit_note or
+                limit_note = (limit_note if
+                              stop_reason.startswith("LIMITE_") else
                               f"Terminazione: {stop_reason} — {stop_detail}")
                 draft = await self.writer.write(question, out_lang, subquestions,
                                                 evidences, limit_note=limit_note)
@@ -389,8 +390,10 @@ class Orchestrator:
                 for c in draft.claims:
                     self.storage.add_claim(run_id, c.claim_id, c.text,
                                            c.citation_no, c.evidence_ids)
+                # P0-1: la bozza viaggia sulla UI con un evento dedicato; il
+                # testo definitivo arriva solo dopo la verifica (report_final)
                 self.emit("report_chunk", 0, title=draft.title,
-                          markdown=draft.markdown)
+                          markdown=draft.markdown, phase="draft")
 
                 # ---- verification ----
                 self.emit("verification_started", 0,
@@ -406,9 +409,26 @@ class Orchestrator:
                     ev_name = {"VERIFIED": "claim_verified", "CORRECTED": "claim_corrected",
                                "REMOVED": "claim_removed"}.get(c.verdict, "claim_failed")
                     self.emit(ev_name, 0, claim_id=c.claim_id, reason=c.verdict_reason)
-                report_md = _final_markdown(draft.title, draft.markdown,
+                # update claims with verdict + unified final number (P0-2)
+                for c in verified.claims:
+                    self.storage._exec(
+                        "UPDATE claims SET final_citation_no=? WHERE id=?",
+                        (c.final_citation_no, c.claim_id))
+                # P0-1: the FINAL text is the verified one — persisted, exported,
+                # streamed. Draft corrections can no longer be thrown away.
+                report_md = _final_markdown(draft.title, verified.markdown,
                                             verified.claims, evidences, src_map)
                 report_claims = verified.claims
+                self.emit("report_final", 0, title=draft.title,
+                          markdown=report_md,
+                          verification={
+                              "claims": verified.stats.number_of_claims,
+                              "verified": verified.stats.number_verified,
+                              "corrected": verified.stats.number_corrected,
+                              "removed": verified.stats.number_removed,
+                              "failed": verified.stats.number_failed,
+                              "uncovered": verified.stats.number_uncovered,
+                          })
             elif not evidences and not cancel.is_set():
                 # B1-fix5: zero evidenze (es. search provider rate-limitato) ->
                 # il run finiva "completed" senza report e senza spiegazione.
@@ -444,27 +464,7 @@ class Orchestrator:
                               evidences)
         if cancel.is_set():
             status = "cancelled"
-        # usage counters (llm client counters are process-cumulative: exact in CLI,
-        # approximate for a long-lived server sharing one client across runs)
-        self.storage.usage_inc(
-            run_id,
-            llm_calls=getattr(self.llm, "llm_calls", 0),
-            llm_tokens_in=getattr(self.llm, "tokens_in", 0),
-            llm_tokens_out=getattr(self.llm, "tokens_out", 0),
-            laya_decisions=getattr(self.decisions, "counts", {}).get("laya", 0),
-            llm_decisions=getattr(self.decisions, "counts", {}).get("llm", 0),
-        )
-        self.storage.finish_run(run_id, status, error,
-                                bool(limit_note), limit_note)
-        # B5: stats (incl. per_cycle) persistite nel run per ispezione UI/API
-        try:
-            self.storage._exec("UPDATE runs SET limits_json=? WHERE id=?",
-                               (json.dumps(stats, ensure_ascii=False), run_id))
-        except Exception:
-            pass
-        self.emit("run_completed" if status == "completed" else
-                  ("run_cancelled" if status == "cancelled" else "run_failed"),
-                  0, status=status, limit_note=limit_note)
+        # B5: stats (incl. per_cycle) — built BEFORE any persistence that uses it
         stats = {
             "sources": len(accepted_docs),
             "evidences": len(evidences),
@@ -482,6 +482,30 @@ class Orchestrator:
         for cyc, agg in sorted(by_cycle.items()):
             agg["steps"] = sum(1 for r in self._timings if r["cycle"] == cyc)
         stats["per_cycle"] = by_cycle
+        # usage counters (llm client counters are process-cumulative: exact in CLI,
+        # approximate for a long-lived server sharing one client across runs)
+        self.storage.usage_inc(
+            run_id,
+            llm_calls=getattr(self.llm, "llm_calls", 0),
+            llm_tokens_in=getattr(self.llm, "tokens_in", 0),
+            llm_tokens_out=getattr(self.llm, "tokens_out", 0),
+            laya_decisions=getattr(self.decisions, "counts", {}).get("laya", 0),
+            llm_decisions=getattr(self.decisions, "counts", {}).get("llm", 0),
+        )
+        # P1-9: limit_note only for REAL limits, never for normal termination
+        real_limit = stop_reason.startswith("LIMITE_") or limit_note.startswith(
+            ("max_", "Limite", "budget"))
+        self.storage.finish_run(run_id, status, error,
+                                bool(real_limit), limit_note if real_limit else "")
+        stats["limit_reached"] = real_limit
+        stats["stop_reason"] = stop_reason
+        # P1-9: persistence errors must surface, not vanish
+        self.storage._exec("UPDATE runs SET limits_json=? WHERE id=?",
+                           (json.dumps(stats, ensure_ascii=False), run_id))
+        self.emit("run_completed" if status == "completed" else
+                  ("run_cancelled" if status == "cancelled" else "run_failed"),
+                  0, status=status, limit_note=limit_note if real_limit else "",
+                  stop_reason=stop_reason)
         usage = self.storage.usage_for_run(run_id) or {}
         stats["llm_calls"] = getattr(self.llm, "llm_calls", 0)
         stats["llm_tokens_in"] = getattr(self.llm, "tokens_in", 0)
@@ -489,8 +513,9 @@ class Orchestrator:
         stats["usage_db"] = usage
         return RunOutcome(run_id=run_id, status=status, question=question,
                           language=language, markdown_path=md_path,
-                          json_path=json_path, limit_reached=bool(limit_note),
-                          limit_note=limit_note, stats=stats)
+                          json_path=json_path, limit_reached=real_limit,
+                          limit_note=limit_note if real_limit else "",
+                          stats=stats)
 
     # ---------- steps ----------
     def _persist_source(self, run_id: str, doc) -> None:
@@ -621,11 +646,17 @@ def _chunkify(doc):
 
 
 def _final_markdown(title: str, body: str, claims, evidences, src_map) -> str:
+    """Bibliography off the UNIFIED citation numbers (P0-2): claim n -> its
+    evidences' sources; a source keeps the number of its first citing claim,
+    additional claims citing it reuse that number in their Fonti annotation.
+    """
     # single H1: title added ONCE here; body must not carry its own
     body = re.sub(r"^\s*#\s+[^\n]+\n+", "", body)
     lines = [f"# {title}", "", body.strip(), "", "## Fonti", ""]
-    seen_src: dict[str, int] = {}
-    for c in sorted(claims, key=lambda c: c.citation_no):
+    seen_src: dict[str, int] = {}  # source_id -> bibliography number
+    src_no: list[tuple[int, str]] = []  # (bib_no, line)
+    for c in sorted((c for c in claims if c.final_citation_no),
+                    key=lambda c: c.final_citation_no):
         for eid in c.evidence_ids:
             e = next((x for x in evidences if x.evidence_id == eid), None)
             if e is None or e.source_id in seen_src:
@@ -633,9 +664,12 @@ def _final_markdown(title: str, body: str, claims, evidences, src_map) -> str:
             src = src_map.get(e.source_id)
             if src is None:
                 continue
-            seen_src[e.source_id] = c.citation_no
-            n = len(seen_src)
+            seen_src[e.source_id] = c.final_citation_no
             date = f", {src.published_at}" if src.published_at else ""
-            lines.append(f"{n}. {src.title or src.domain} — {src.final_url or src.url}"
-                         f" ({src.domain}{date})")
+            src_no.append((c.final_citation_no,
+                           f"{src.title or src.domain} — {src.final_url or src.url}"
+                           f" ({src.domain}{date})"))
+    # bibliography ordered by number: a source cited first by claim 3 takes 3
+    for n, ln in sorted(src_no, key=lambda t: t[0]):
+        lines.append(f"{n}. {ln}")
     return "\n".join(lines)

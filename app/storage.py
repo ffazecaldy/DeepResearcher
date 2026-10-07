@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS decisions(
 );
 CREATE TABLE IF NOT EXISTS claims(
   id TEXT PRIMARY KEY, run_id TEXT NOT NULL, evidence_ids_json TEXT, text TEXT,
-  citation_no INTEGER
+  citation_no INTEGER, final_citation_no INTEGER
 );
 CREATE TABLE IF NOT EXISTS reports(
   id TEXT PRIMARY KEY, run_id TEXT NOT NULL, title TEXT, markdown TEXT, created_at REAL
@@ -222,11 +222,12 @@ class Storage:
 
     # ---------- claims / report / verification ----------
     def add_claim(self, run_id: str, claim_id: str, text: str, citation_no: int,
-                  evidence_ids: list[str]) -> None:
+                  evidence_ids: list[str], final_citation_no: int | None = None) -> None:
         self._exec(
-            "INSERT INTO claims(id, run_id, evidence_ids_json, text, citation_no)"
-            " VALUES(?,?,?,?,?)",
-            (claim_id, run_id, json.dumps(evidence_ids), text, citation_no),
+            "INSERT INTO claims(id, run_id, evidence_ids_json, text, citation_no,"
+            " final_citation_no) VALUES(?,?,?,?,?,?)",
+            (claim_id, run_id, json.dumps(evidence_ids), text, citation_no,
+             final_citation_no),
         )
 
     def save_report(self, run_id: str, report_id: str, title: str, markdown: str) -> None:
