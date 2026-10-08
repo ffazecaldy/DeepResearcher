@@ -331,7 +331,13 @@ function handleEvent(ev) {
   if (["claim_verified", "claim_corrected", "claim_removed", "claim_failed"]
     .includes(type)) state.counters.claims += 1;
   if (type === "run_started") setStatus("running");
-  if (type === "report_chunk" && p.markdown) renderReport(p.markdown);
+  if (type === "report_chunk" && p.markdown && p.phase === "draft") {
+    // P0-1: bozza in streaming; il testo definitivo arriva con report_final
+    renderReport(p.markdown + "\n\n*verifica in corso...*");
+  }
+  if (type === "report_final" && p.markdown) {
+    renderReport(p.markdown);  // verified text replaces the draft
+  }
   if (type === "run_completed") {
     // B1: "completata con N avvisi" quando ci sono verifiche fallite
     finishRun(state.failedChecks ? "completed-warnings" : "completed");
@@ -494,7 +500,7 @@ async function openCitation(n) {
     return;
   }
   const claims = (data.claims || []).filter(
-    (c) => Number(c.citation_no) === Number(n));
+    (c) => Number(c.final_citation_no ?? c.citation_no) === Number(n));
   if (!claims.length) {
     body.innerHTML = `<p class="muted">Nessun claim con citazione [${n}].</p>`;
   } else {
