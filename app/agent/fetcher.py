@@ -176,8 +176,12 @@ class Fetcher:
                     doc.author = meta.get("author")
                     doc.published_at = meta.get("published_at")
                     doc.byte_len = len(resp.content)
-                doc.text = text
-                break
+                    doc.text = text
+                    # P1-8: links come from the RAW HTML (<a href>), not from
+                    # the extracted text; kept as document metadata
+                    from app.agent.snowball import extract_links as _xlinks
+                    doc.links = _xlinks(resp.text, base_url=current, max_links=30)
+                    break
             else:
                 doc.fetch_status = FetchStatus.FETCH_FAILED
                 doc.error = f"too many redirects (>={self._settings.fetch_max_redirects})"

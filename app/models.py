@@ -88,6 +88,7 @@ class FetchedDocument(BaseModel):
     domain: str = ""
     title: str = ""
     text: str = ""
+    links: list[str] = Field(default_factory=list)  # P1-8: <a href> dal raw HTML
     http_status: int | None = None
     content_type: str = ""
     published_at: str | None = None

@@ -15,7 +15,7 @@ from app.agent.search_state import SearchState
 from app.events.bus import EventBus
 from app.limits import LimitReached, RuntimeBudget
 from app.models import (Chunk, DecisionKind, DecisionSpec, Event, RunOutcome,
-                        SubQuestion)
+                        SearchResultItem, SubQuestion)
 from app.provenance.tracker import ProvenanceTracker
 from app.security import wrap_external  # noqa: F401  (re-exported for tests)
 
@@ -238,7 +238,7 @@ class Orchestrator:
                     gen_queries = await self.query_generator.generate(
                         question, open_sqs, shared_state, cycle)
                     all_q = (gen_queries
-                             + [_as_query(self.run_id, q.subquestion_id, q.text,
+                             + [_as_query(ctx.run_id, q.subquestion_id, q.text,
                                           cycle, i)
                                 for i, q in enumerate(gap_new_queries)]
                              + ctx.snowball_queries(cycle, seen_urls))
@@ -260,9 +260,23 @@ class Orchestrator:
                             self.settings.search_provider.value)
                 log.debug("[CICLO %s/%s] query: %s", cycle, effective,
                           [q.text for q in queries])
+                # P1-8: snowball URLs (http… nel testo della query) sono
+                # fetchati DIRETTAMENTE con le stesse protezioni/budget del
+                # fetch ordinario — non passano dal motore di ricerca
+                url_items = []
+                text_queries = []
+                for q in queries:
+                    if q.text.lower().startswith(("http://", "https://")):
+                        url_items.append(SearchResultItem(
+                            query_id=q.query_id, url=q.text,
+                            title="snowball link", position=0))
+                    else:
+                        text_queries.append(q)
                 self.emit(ctx, "query_started", cycle, count=len(queries))
-                items = await self.searcher.run_queries(
-                    queries, self.settings.max_pages_per_query)
+                items = list(await self.searcher.run_queries(
+                    text_queries, self.settings.max_pages_per_query))
+                if url_items:
+                    items.extend(url_items)
                 # P1-5: persist query -> result links (multiple queries may hit
                 # the same URL: every pair is stored, never collapsed)
                 for q in queries:
@@ -311,13 +325,12 @@ class Orchestrator:
                         else:
                             self.emit(ctx, "source_failed", cycle, source_id=doc.source_id,
                                       url=doc.url, error=doc.error)
-                    accepted = await self._evaluate_docs(run_id, cycle, docs, question, decisions, ctx)
-                    # B4: snowballing — link citati dalle pagine accettate
-                    from app.agent.snowball import extract_links as _xlinks
+                    accepted = await self._evaluate_docs(run_id, cycle, docs,
+                                                         question, decisions, ctx)
+                    # B4/P1-8: snowballing — link <a href> del RAW HTML delle
+                    # pagine accettate (non del testo estratto)
                     for doc in accepted:
-                        for u in _xlinks(doc.text[:8000],
-                                         base_url=doc.final_url or doc.url,
-                                         max_links=10):
+                        for u in (doc.links or [])[:10]:
                             ctx.snowball.propose(u)
                     t_fetch = time.perf_counter() - _t_fetch
                     ctx.timings.append({"cycle": cycle, "step": "fetch+judge",
