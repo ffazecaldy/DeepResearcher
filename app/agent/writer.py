@@ -52,11 +52,30 @@ _WRITER_MAX_EVIDENCES = 30  # prompt cap: too many ids -> truncated/garbled JSON
 
 def _trim_evidences(evidences: list[Evidence],
                     cap: int = _WRITER_MAX_EVIDENCES) -> list[Evidence]:
-    """Evenly sample evidences so every source/subquestion stays represented."""
+    """P1-11: evidence pack balanced by source and subquestion.
+
+    Round-robin across (subquestion, source) groups so every aspect of the
+    question and every source stays represented; within a group, higher
+    quality_score first. Deterministic; falls back to even sampling when
+    there are no groups at all.
+    """
     if len(evidences) <= cap:
         return evidences
-    step = len(evidences) / cap
-    return [evidences[int(i * step)] for i in range(cap)]
+    groups: dict[tuple[str, str], list[Evidence]] = {}
+    for e in evidences:
+        groups.setdefault((e.subquestion_id or "", e.source_id), []).append(e)
+    if not groups:
+        step = len(evidences) / cap
+        return [evidences[int(i * step)] for i in range(cap)]
+    # sort keys for determinism; order groups round-robin
+    ordered: list[Evidence] = []
+    queues = [sorted(g, key=lambda e: (-(e.quality_score or 0), e.evidence_id))
+              for _, g in sorted(groups.items())]
+    while len(ordered) < cap and any(queues):
+        for q in queues:
+            if q and len(ordered) < cap:
+                ordered.append(q.pop(0))
+    return ordered
 
 
 class Writer:

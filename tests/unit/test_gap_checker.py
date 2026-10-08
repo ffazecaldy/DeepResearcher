@@ -85,7 +85,11 @@ async def test_same_domain_counts_as_one(tmp_path):
 
 
 async def test_complete_requires_all_covered(tmp_path):
-    fake = FakeLLMClient([json.dumps(RAW)])
+    # P1-7: with an open contradiction the research stays open even if every
+    # sub-question is covered -> RAW has contradictions, so build a clean one
+    raw_clean = dict(RAW)
+    raw_clean["contradictions"] = []
+    fake = FakeLLMClient([json.dumps(raw_clean)])
     gc = GapChecker(fake, prompts_dir=_tmp_prompts(tmp_path))
     evidences = [
         _ev("ev1", "sq1", "s1"), _ev("ev2", "sq1", "s2"),
@@ -95,6 +99,20 @@ async def test_complete_requires_all_covered(tmp_path):
                             domain_of={f"s{i}": f"d{i}.it" for i in range(1, 5)})
     assert report.complete is True
     assert report.covered_subquestions == ["sq1", "sq2"]
+
+
+async def test_open_contradiction_blocks_complete(tmp_path):
+    """P1-7: covered subquestions + unresolved contradiction -> NOT complete."""
+    fake = FakeLLMClient([json.dumps(RAW)])  # RAW carries one contradiction
+    gc = GapChecker(fake, prompts_dir=_tmp_prompts(tmp_path))
+    evidences = [
+        _ev("ev1", "sq1", "s1"), _ev("ev2", "sq1", "s2"),
+        _ev("ev3", "sq2", "s3"), _ev("ev4", "sq2", "s4"),
+    ]
+    report = await gc.check("q", _subs(), evidences,
+                            domain_of={f"s{i}": f"d{i}.it" for i in range(1, 5)})
+    assert report.contradictions
+    assert report.complete is False  # kept open for the contradiction
 
 
 async def test_malformed_llm_json_never_raises(tmp_path):

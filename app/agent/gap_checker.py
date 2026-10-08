@@ -166,8 +166,14 @@ class GapChecker:
             log.warning("gap_checker: LLM verdict unusable (%s); coverage is "
                         "decided in code and the run continues", exc)
 
-        # the CODE decides coverage (LLM proposes, code disposes)
+        # the CODE decides coverage (LLM proposes, code disposes).
+        # P1-7: unresolved contradictions keep the research open — a covered
+        # subquestion with an open contradiction is not a finished answer.
         complete, status = compute_coverage(subquestions, evidences, domain_of)
+        if complete and contradictions:
+            log.info("gap_checker: copertura completa ma %d contraddizioni "
+                     "aperte -> la ricerca continua", len(contradictions))
+            complete = False
         covered = [s.subquestion_id for s in subquestions
                    if status[s.subquestion_id] == "coperta"]
         partial = [s.subquestion_id for s in subquestions

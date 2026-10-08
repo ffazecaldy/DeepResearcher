@@ -27,6 +27,7 @@ class UnsafeUrlError(ValueError):
 
 _DNS_CACHE: dict[str, tuple[float, list[str]]] = {}
 _DNS_TTL_S = 300.0
+_DNS_RESOLVER = None  # injectable for tests: set to a callable host -> [ips]
 
 
 def _resolve(host: str) -> list[str]:
@@ -34,6 +35,9 @@ def _resolve(host: str) -> list[str]:
     hit = _DNS_CACHE.get(host)
     if hit and now - hit[0] < _DNS_TTL_S:
         return hit[1]
+    resolver = _DNS_RESOLVER  # tests inject a fake resolver (deterministic)
+    if resolver is not None:
+        return list(resolver(host))
     infos = socket.getaddrinfo(host, None)
     addrs = [sockaddr[0] for _fam, _typ, _proto, _canon, sockaddr in infos]
     _DNS_CACHE[host] = (now, addrs)
