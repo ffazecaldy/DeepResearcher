@@ -38,9 +38,12 @@ def test_snowball_state_proposes_and_dedupes():
     st.propose("https://primary.example/studio")  # duplicate
     st.propose("https://primary.example/altro")
     pending = st.take_pending(already_seen_norm=set())
-    assert len(pending) == 2
-    # after take, nothing pending remains
-    assert st.take_pending(already_seen_norm=set()) == []
+    assert len(pending) == 2  # duplicate proposal collapsed
+    # take_pending is non-consuming (the orchestrator dedupes via seen_urls):
+    # the same candidates return until marked seen
+    assert len(st.take_pending(already_seen_norm=set())) == 2
+    seen = {pending[0]}
+    assert st.take_pending(already_seen_norm=seen) == [pending[1]]
 
 
 def test_snowball_skips_already_seen_urls():
