@@ -346,9 +346,21 @@ class Orchestrator:
                                   stop_reason=stop_reason, stop_detail=stop_detail)
                         break
 
+                    # P1-9: cooperative deadline — also checked between fetch
+                    # and read (a long read must not start past the deadline),
+                    # and writer/verification get a RESERVED tail of the budget
                     if cancel.is_set():
                         status = "cancelled"
                         stop_reason, stop_detail = "ANNULLATO", "richiesta utente"
+                        break
+                    if cycle_deadline[0] and time.monotonic() > cycle_deadline[0]:
+                        limit_note = (limit_note or
+                                      f"max_seconds_per_cycle={per_cycle_s} al ciclo {cycle}")
+                        stop_reason, stop_detail = "LIMITE_CICLO", (
+                            f"budget per ciclo esaurito: {per_cycle_s}s al ciclo {cycle}")
+                        log.debug("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
+                        self.emit(ctx, "cycle_completed", cycle, complete=True,
+                                  stop_reason=stop_reason, stop_detail=stop_detail)
                         break
 
                 # ---- gap check (coverage decided in code) ----
@@ -391,7 +403,14 @@ class Orchestrator:
                 self.emit(ctx, "cycle_completed", cycle)
 
             # ---- writing ----
-            if evidences and not cancel.is_set():
+            # P1-9: reserve a tail of the budget for write+verify; only start
+            # writing if at least the reserve is left (or the cap is disabled)
+            reserve_s = max(60.0, budget.max_runtime_seconds * 0.2) \
+                if budget.max_runtime_seconds > 0 else 0.0
+            if evidences and not cancel.is_set() and (
+                    budget.max_runtime_seconds <= 0
+                    or budget.time_left() >= reserve_s
+                    or status == "completed" and budget.time_left() > 0):
                 t_write = time.perf_counter()
                 out_lang = self.settings.report_language or language
                 log.debug("[WRITER] language=%s | evidenze totali=%s",
