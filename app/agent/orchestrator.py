@@ -603,18 +603,69 @@ class Orchestrator:
         return accepted
 
     async def _read_docs(self, ctx, question, cycle, accepted_docs, subquestions):
+        """P1-6: relevance-oriented reading.
+
+        - chunk selection: keyword overlap with the OPEN subquestions picks
+          which chunks of each doc are read first (position no longer hides a
+          bottom-of-page answer); ties keep document order.
+        - subquestion assignment: best-matching subquestion per chunk (keyword
+          overlap), not round-robin; a chunk may target the same subquestion
+          from different docs.
+        - budget: per-source share = ceil(remaining / remaining docs), so early
+          docs cannot eat the whole cycle budget.
+        """
         evidences = []
-        budget = _MAX_EVIDENCES_PER_CYCLE
-        per_source = max(1, self.settings.reader_chunks_per_source)
+        total_budget = _MAX_EVIDENCES_PER_CYCLE
+        per_source_cap = max(1, self.settings.reader_chunks_per_source)
+        remaining_docs = len(accepted_docs)
+        budget = total_budget
+
+        def _kw(text: str) -> set[str]:
+            stop = {"della", "dello", "delle", "degli", "nella", "nel", "per",
+                    "con", "che", "come", "sono", "essere", "quale", "quali",
+                    "the", "and", "for", "with", "that", "this", "from"}
+            return {w for w in re.findall(r"[\wà-ù]{4,}", text.lower())
+                    if w not in stop}
+
+        sq_tokens = [(sq, _kw(sq.text)) for sq in subquestions]
+
+        def _best_sq(ch: Chunk):
+            """Subquestion with the highest keyword overlap with the chunk."""
+            ch_tokens = _kw(ch.text)
+            best, best_score = None, 0
+            for sq, toks in sq_tokens:
+                score = len(ch_tokens & toks)
+                if score > best_score:
+                    best, best_score = sq, score
+            return best
+
+        def _pick_chunks(doc) -> list[Chunk]:
+            """The most subquestion-relevant chunks of the doc (stable ties)."""
+            all_chunks = _chunkify(doc)
+            if len(all_chunks) <= per_source_cap:
+                return all_chunks
+            scored = []
+            for i, ch in enumerate(all_chunks):
+                toks = _kw(ch.text)
+                score = max((len(toks & stoks) for _sq, stoks in sq_tokens),
+                            default=0)
+                scored.append((-score, i))  # sort key: relevance desc, then pos
+            scored.sort()
+            picked = [all_chunks[i] for _s, i in scored[:per_source_cap]]
+            picked.sort(key=lambda c: c.idx)  # keep reading order
+            return picked
+
         for doc in accepted_docs:
             if budget <= 0:
                 break
-            chunks = _chunkify(doc)[:per_source]  # deeper reads per source
-            # rotate the subquestion per chunk: every aspect of the plan is probed
-            for j, ch in enumerate(chunks):
+            share = max(1, -(-budget // max(1, remaining_docs)))  # ceil division
+            chunks = _pick_chunks(doc)[:max(1, min(per_source_cap, share))]
+            remaining_docs -= 1
+            for ch in chunks:
                 if budget <= 0:
                     break
-                sq = subquestions[j % len(subquestions)] if subquestions else None
+                sq = _best_sq(ch) if sq_tokens else (
+                    subquestions[0] if subquestions else None)
                 self.emit(ctx, "source_reading", cycle, url=doc.final_url or doc.url,
                           subquestion=sq.text if sq else "")
                 found = await self.reader.extract_evidences(
