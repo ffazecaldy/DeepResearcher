@@ -15,8 +15,11 @@ def test_cycle_role_mapping():
     assert cycle_role(1) == "esplorazione"
     assert cycle_role(2) == "approfondimento"
     assert cycle_role(3) == "verifica"
-    assert cycle_role(4) == "verifica"
-    assert cycle_role(5) == "verifica"
+    assert cycle_role(4) == "nuovi_sottotemi"
+    assert cycle_role(5) == "verifica_ulteriore"
+    assert cycle_role(6) == "approfondimento_2"
+    assert cycle_role(7) == "sintesi_cross"
+    assert cycle_role(8) == "verifica_finale"
 
 
 def test_cycle_role_invalid_cycle():

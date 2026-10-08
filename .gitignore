@@ -5,3 +5,10 @@ __pycache__/
 .env
 data/
 reports/
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+scratch/

@@ -15,8 +15,18 @@ def domain_of(url: str) -> str:
     return (urlsplit(url).hostname or "").lower()
 
 
-# B4: ruoli del ciclo — esplorazione (1), approfondimento (2), verifica (3+)
-CYCLE_ROLES: dict[int, str] = {1: "esplorazione", 2: "approfondimento"}
+# B4: ruoli del ciclo — esplorazione (1), approfondimento (2), verifica (3),
+# poi i cicli extra dell'approfondita (4+)
+CYCLE_ROLES: dict[int, str] = {
+    1: "esplorazione",
+    2: "approfondimento",
+    3: "verifica",
+    4: "nuovi_sottotemi",
+    5: "verifica_ulteriore",
+    6: "approfondimento_2",
+    7: "sintesi_cross",
+    8: "verifica_finale",
+}
 
 
 def cycle_role(cycle: int) -> str:

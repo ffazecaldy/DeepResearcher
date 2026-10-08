@@ -218,6 +218,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
 
+    # ---------- coherence ----------
+    @app.get("/api/runs/{run_id}/coherence")
+    async def run_coherence(run_id: str) -> dict[str, Any]:
+        report = storage.report_for_run(run_id)
+        if report is None:
+            raise HTTPException(404, "report non presente per questo run")
+        from app.agent.coherence import CoherenceChecker
+        quotes = [e.get("quote") or "" for e in storage.evidences_for_run(run_id)]
+        checker = CoherenceChecker(comps["llm"])
+        try:
+            result = await checker.check(
+                (storage.get_run(run_id) or {}).get("question", ""),
+                report.get("markdown", ""),
+                storage.claims_for_run(run_id), quotes)
+        except Exception as exc:  # the checker must not break the API either
+            log.exception("coherence check su run %s fallito", run_id)
+            raise HTTPException(500, f"coherence check fallito: {exc}") from exc
+        return {"passed": result.passed, "issues": result.issues,
+                "checked_sentences": result.checked_sentences}
+
     # ---------- exports ----------
     @app.get("/api/runs/{run_id}/report.md")
     async def report_md(run_id: str) -> PlainTextResponse:

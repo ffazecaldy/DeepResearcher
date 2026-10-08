@@ -45,7 +45,7 @@ cp .env.example .env    # poi inserisci le tue chiavi in .env (mai nel codice)
 | `DR_DECISION_LAYA_DECISIONS` | nomi separati da virgola | default `is_relevant` (benchmark Fase 2) |
 | `DR_MAX_CYCLES`, `DR_MAX_TOTAL_PAGES`, `DR_MAX_RUNTIME_SECONDS`, … | interi | limiti hard del run |
 
-Profondità: `rapida`=1 ciclo, `standard`=3, `approfondita`=5.
+Profondità: `rapida`=1 ciclo, `standard`=3, `approfondita`=8 (richiede `DR_MAX_CYCLES>=8`, nuovo default).
 
 ## Pipeline
 

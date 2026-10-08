@@ -34,7 +34,7 @@ class Depth(StrEnum):
 DEPTH_CYCLES: dict[Depth, int] = {
     Depth.RAPIDA: 1,
     Depth.STANDARD: 3,
-    Depth.APPROFONDITA: 5,
+    Depth.APPROFONDITA: 8,
 }
 
 
@@ -73,7 +73,9 @@ class Settings(BaseSettings):
     usage_emit_every_s: float = 2.0  # throttle for usage_update events
 
     # Limits
-    max_cycles: int = 3
+    # default = DEPTH_CYCLES max: cycle_budget fa min(max_cycles, DEPTH_CYCLES[depth]),
+    # quindi max_cycles < 8 troncherebbe l'approfondita
+    max_cycles: int = 8
     max_queries_per_cycle: int = 6
     max_pages_per_query: int = 5
     max_pages_per_domain: int = 2  # per-cycle domain cap (0 = unlimited)
