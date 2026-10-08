@@ -32,6 +32,12 @@ class _Gap:
                              for i in all_ids}
 
 
+class _Ctx:
+    """RunContext stub: only the fields _should_stop touches."""
+    run_id = "t"
+    no_novelty = 0
+
+
 def _orch():
     import sys
     sys.path.insert(0, ".")
@@ -48,7 +54,7 @@ def _orch():
 def test_stop_complete_coverage():
     o = _orch()
     stop, reason, _ = o._should_stop(
-        cycle=2, effective=5, budget=_Budget(), gap_report=_Gap(True, ["a"], ["a"]),
+        ctx=_Ctx(), cycle=2, effective=5, budget=_Budget(), gap_report=_Gap(True, ["a"], ["a"]),
         new_urls=5, new_domains=3, shared_state=SearchState())
     assert stop and reason == "COPERTURA_COMPLETA"
 
@@ -56,7 +62,7 @@ def test_stop_complete_coverage():
 def test_stop_max_cycles_is_default_and_not_early():
     o = _orch()
     stop, reason, _ = o._should_stop(
-        cycle=1, effective=5, budget=_Budget(), gap_report=_Gap(False, [], ["a"]),
+        ctx=_Ctx(), cycle=1, effective=5, budget=_Budget(), gap_report=_Gap(False, [], ["a"]),
         new_urls=5, new_domains=3, shared_state=SearchState())
     assert not stop  # ciclo 1 con novità: si continua
     # nessuna delle cause anticipate: il loop finirà per MAX_CICLI
@@ -66,7 +72,7 @@ def test_stop_max_cycles_is_default_and_not_early():
 def test_stop_time_limit():
     o = _orch()
     stop, reason, _ = o._should_stop(
-        cycle=1, effective=5, budget=_Budget(time_left=0.0),
+        ctx=_Ctx(), cycle=1, effective=5, budget=_Budget(time_left=0.0),
         gap_report=_Gap(False, [], ["a"]), new_urls=5, new_domains=3,
         shared_state=SearchState())
     assert stop and reason == "LIMITE_TEMPO"
@@ -75,9 +81,10 @@ def test_stop_time_limit():
 def test_stop_no_novelty_after_two_cycles():
     o = _orch()
     shared = SearchState()
+    ctx = _Ctx()  # ONE ctx across cycles: novelty accumulates in the run context
     for _ in range(2):
         stop, reason, _ = o._should_stop(
-            cycle=2, effective=5, budget=_Budget(), gap_report=_Gap(False, [], ["a"]),
+            ctx=ctx, cycle=2, effective=5, budget=_Budget(), gap_report=_Gap(False, [], ["a"]),
             new_urls=0, new_domains=0, shared_state=shared)
     assert stop and reason == "NESSUNA_NOVITA"
 
@@ -87,7 +94,7 @@ def test_stop_unsolvable_after_two_attempts_no_loop():
     shared = SearchState()
     shared.attempts_by_sq = {"sq_a": 2}
     stop, reason, detail = o._should_stop(
-        cycle=3, effective=5, budget=_Budget(), gap_report=_Gap(False, [], ["sq_a"]),
+        ctx=_Ctx(), cycle=3, effective=5, budget=_Budget(), gap_report=_Gap(False, [], ["sq_a"]),
         new_urls=4, new_domains=2, shared_state=shared)
     assert stop and reason == "SOTTODOMANDE_NON_RISOLVIBILI"
     assert "sq_a" in detail

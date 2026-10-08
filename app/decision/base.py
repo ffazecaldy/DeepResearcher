@@ -4,6 +4,7 @@ from __future__ import annotations
 import abc
 import json
 import logging
+import threading
 import time
 
 from app.models import DecisionResult, DecisionSpec
@@ -33,7 +34,12 @@ class DecisionEngine(abc.ABC):
 
 
 class DecisionRouter:
-    """Routes decisions to the primary engine with guaranteed fallback; records all."""
+    """Routes decisions to the primary engine with guaranteed fallback; records all.
+
+    Concurrency (P0-4): engines are shared (stateless/thread-safe at the call
+    level); run_id and counts are PER-SESSION via ``bind()`` — every run binds
+    its own view before executing, never mutating a peer's binding.
+    """
 
     def __init__(self, primary: DecisionEngine | None, fallback: DecisionEngine, *,
                  storage=None, run_id: str = "",
@@ -45,6 +51,16 @@ class DecisionRouter:
         # None = primary for every decision; else only these decision names
         self.primary_only = primary_only
         self.counts: dict[str, int] = {}
+        self._local = threading.local()
+
+    def bind(self, run_id: str) -> "DecisionRouter":
+        """Per-run view: same engines, isolated run_id/counts (P0-4)."""
+        import copy
+        view = copy.copy(self)
+        view.run_id = run_id
+        view.counts = {}
+        view._local = threading.local()
+        return view
 
     def _use_primary(self, spec_name: str) -> bool:
         if self.primary is None:

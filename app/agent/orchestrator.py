@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import Depth
@@ -29,6 +30,21 @@ def _unwrap(x):
     return x[0] if isinstance(x, tuple) else x
 
 
+@dataclass
+class RunContext:
+    """Per-run isolated state (P0-4): the orchestrator instance is shared
+    across concurrent runs; NOTHING mutable lives on self anymore."""
+    run_id: str
+    no_novelty: int = 0
+    snowball: object = None          # SnowballState (created per run)
+    stats: dict = field(default_factory=lambda: {"sources": 0, "evidences": 0})
+    cycle: int = 0
+    last_usage_emit: float = 0.0
+    timings: list = field(default_factory=list)
+    cycle_tokens_in: int = 0
+    cycle_tokens_out: int = 0
+
+
 class Orchestrator:
     def __init__(self, settings, storage, bus: EventBus, llm,
                  searcher, fetcher, decisions, planner, reader,
@@ -46,10 +62,9 @@ class Orchestrator:
         self.writer = writer
         self.verifier = verifier
         self.query_generator = query_generator or QueryGenerator(llm)
-        self.run_id: str = ""
 
     # ---------- termination (SINGLE decision point) ----------
-    def _should_stop(self, *, cycle: int, effective: int, budget,
+    def _should_stop(self, *, ctx, cycle: int, effective: int, budget,
                      gap_report, new_urls: int, new_domains: int,
                      shared_state: SearchState) -> tuple[bool, str, str]:
         """The ONLY place where the cycle loop may end early. Returns
@@ -65,10 +80,10 @@ class Orchestrator:
             return True, "LIMITE_PAGINE", f"max_total_pages={budget.max_total_pages}"
         # (d) two consecutive cycles without relevant novelty
         if cycle >= 2 and new_urls == 0:
-            self._no_novelty = getattr(self, "_no_novelty", 0) + 1
+            ctx.no_novelty += 1
         else:
-            self._no_novelty = 0
-        if self._no_novelty >= 2:
+            ctx.no_novelty = 0
+        if ctx.no_novelty >= 2:
             return True, "NESSUNA_NOVITA", (
                 "due cicli consecutivi senza URL nuovi dopo diversificazione")
         # (e) unsolvable: >=2 diversification attempts for every open sub-question
@@ -83,8 +98,8 @@ class Orchestrator:
         return False, "", ""
 
     # ---------- events ----------
-    def emit(self, type_: str, cycle: int, **payload) -> None:
-        self.bus.publish(Event(type=type_, run_id=self.run_id, cycle=cycle,
+    def emit(self, ctx, type_: str, cycle: int, **payload) -> None:
+        self.bus.publish(Event(type=type_, run_id=ctx.run_id, cycle=cycle,
                                payload=payload))
 
     def _snowball_queries(self, cycle: int, seen_urls: set[str]):
@@ -97,7 +112,7 @@ class Orchestrator:
         from app.security import normalize_for_dedupe
         seen_norm = {normalize_for_dedupe(u) for u in seen_urls}
         out = []
-        for url in self._snowball.take_pending(seen_norm):
+        for url in ctx.snowball.take_pending(seen_norm):
             out.append(GeneratedQuery(
                 query_id=f"{self.run_id[:24]}_sb{cycle}_{len(out) + 1}",
                 subquestion_id="", text=url, cycle=cycle))
@@ -107,11 +122,12 @@ class Orchestrator:
     # ---------- run ----------
     async def run(self, question: str, language: str, depth: Depth, run_id: str,
                   cancel: asyncio.Event) -> RunOutcome:
-        self.run_id = run_id
-        self.decisions.run_id = run_id
+        ctx = RunContext(run_id=run_id)
+        decisions = (self.decisions.bind(run_id)
+                     if hasattr(self.decisions, "bind") else self.decisions)
         self.storage.usage_init(run_id)
         self.storage.create_run(run_id, question, language, depth.value)
-        self.emit("run_started", 0, question=question, depth=depth.value,
+        self.emit(ctx, "run_started", 0, question=question, depth=depth.value,
                   language=language)
         budget = RuntimeBudget(max_runtime_seconds=self.settings.max_runtime_seconds,
                                max_total_pages=self.settings.max_total_pages)
@@ -125,7 +141,7 @@ class Orchestrator:
         shared_state = SearchState()
         # B4: candidate URL da snowballing (link citati dalle fonti accettate)
         from app.agent.snowball import SnowballState
-        self._snowball = SnowballState()
+        ctx.snowball = SnowballState()
         # B5: budget tempo per ciclo (0 = disattivo) + token/step per ciclo
         per_cycle_s = getattr(self.settings, "max_seconds_per_cycle", 0) or 0
         cycle_deadline = [0.0]
@@ -143,10 +159,7 @@ class Orchestrator:
         accepted: list = []  # per-cycle; definita anche quando `items` è vuoto
         report_md = ""
         report_claims = []
-        self._stats = {"sources": 0, "evidences": 0}
-        self._cycle = 0
-        self._last_usage_emit = 0.0
-        self._timings: list[dict] = []  # FASE C: tempo per step per ciclo
+        attempts = 0  # writer language regenerations
 
         try:
             for cycle in range(1, self.settings.cycle_budget(depth) + 1):
@@ -161,21 +174,21 @@ class Orchestrator:
                     limit_note = str(exc)
                     stop_reason, stop_detail = "LIMITE_TEMPO", str(exc)
                     break
-                self._cycle = cycle
+                ctx.cycle = cycle
                 # B4: ruolo del ciclo nel payload (esplorazione/approfondimento/verifica)
                 from app.agent.search_state import cycle_role as _cycle_role
-                self.emit("cycle_started", cycle, role=_cycle_role(cycle))
+                self.emit(ctx, "cycle_started", cycle, role=_cycle_role(cycle))
                 # B5: deadline di ciclo + snapshot token a inizio ciclo
                 cycle_deadline[0] = (time.monotonic() + per_cycle_s
                                      if per_cycle_s > 0 else 0.0)
                 cycle_tokens_start[0] = (getattr(self.llm, "tokens_in", 0)
                                          + getattr(self.llm, "tokens_out", 0))
-                self._cycle_tokens_in = 0
-                self._cycle_tokens_out = 0
+                ctx.cycle_tokens_in = 0
+                ctx.cycle_tokens_out = 0
 
                 # ---- planning (first cycle only) ----
                 if plan is None:
-                    self.emit("planning_started", cycle,
+                    self.emit(ctx, "planning_started", cycle,
                           note="Il bot sta analizzando la domanda e scegliendo le pagine")
                     # B5: la lingua del piano segue la lingua GLOBALE del report,
                     # non la lingua della domanda (coerenza titolo/sotto-domande/report)
@@ -200,7 +213,7 @@ class Orchestrator:
                         self.storage.add_query(run_id, q.query_id,
                                                q.subquestion_id, q.text, 1,
                                                self.settings.search_provider.value)
-                    self.emit("plan_generated", cycle, title=plan.title,
+                    self.emit(ctx, "plan_generated", cycle, title=plan.title,
                               subquestions=[s.text for s in subquestions],
                               queries=[q.text for q in plan.queries[:cap]])
 
@@ -222,7 +235,7 @@ class Orchestrator:
                              + [_as_query(self.run_id, q.subquestion_id, q.text,
                                           cycle, i)
                                 for i, q in enumerate(gap_new_queries)]
-                             + self._snowball_queries(cycle, seen_urls))
+                             + ctx.snowball_queries(cycle, seen_urls))
                     seen_texts = set()
                     queries = []
                     for q in all_q:
@@ -237,7 +250,7 @@ class Orchestrator:
                         shared_state.see_query(q.text)
                 log.debug("[CICLO %s/%s] query: %s", cycle, effective,
                           [q.text for q in queries])
-                self.emit("query_started", cycle, count=len(queries))
+                self.emit(ctx, "query_started", cycle, count=len(queries))
                 items = await self.searcher.run_queries(
                     queries, self.settings.max_pages_per_query)
                 items = [it for it in items
@@ -254,16 +267,16 @@ class Orchestrator:
                 log.debug("[CICLO %s] risultati DOPO filtro seen_urls: %s | domini: %s",
                           cycle, len(items), domains)
                 new_urls = len(items)
-                self.emit("search_result_found", cycle, count=len(items))
+                self.emit(ctx, "search_result_found", cycle, count=len(items))
                 t_search = time.perf_counter() - _t_search
-                self._timings.append({"cycle": cycle, "step": "search",
+                ctx.timings.append({"cycle": cycle, "step": "search",
                                       "s": round(t_search, 1)})
                 log.debug("[TEMPI] ciclo %s search=%.1fs", cycle, t_search)
-                self._maybe_emit_usage()
+                self._maybe_emit_usage(ctx)
                 if items:
                     _t_fetch = time.perf_counter()
                     def _fetch_event(kind: str, url: str) -> None:
-                        self.emit(kind, cycle, url=url)
+                        self.emit(ctx, kind, cycle, url=url)
                     try:
                         docs = await self.fetcher.fetch_all(items, budget,
                                                             on_event=_fetch_event)
@@ -273,36 +286,36 @@ class Orchestrator:
                     for doc in docs:
                         self._persist_source(run_id, doc)
                         if doc.fetch_status.value.startswith(("SUCCESS", "PARTIAL")):
-                            self._stats["sources"] += 1
-                            self.emit("source_fetched", cycle, source_id=doc.source_id,
+                            ctx.stats["sources"] += 1
+                            self.emit(ctx, "source_fetched", cycle, source_id=doc.source_id,
                                       url=doc.final_url or doc.url)
                         else:
-                            self.emit("source_failed", cycle, source_id=doc.source_id,
+                            self.emit(ctx, "source_failed", cycle, source_id=doc.source_id,
                                       url=doc.url, error=doc.error)
-                    accepted = await self._evaluate_docs(run_id, cycle, docs, question)
+                    accepted = await self._evaluate_docs(run_id, cycle, docs, question, decisions, ctx)
                     # B4: snowballing — link citati dalle pagine accettate
                     from app.agent.snowball import extract_links as _xlinks
                     for doc in accepted:
                         for u in _xlinks(doc.text[:8000],
                                          base_url=doc.final_url or doc.url,
                                          max_links=10):
-                            self._snowball.propose(u)
+                            ctx.snowball.propose(u)
                     t_fetch = time.perf_counter() - _t_fetch
-                    self._timings.append({"cycle": cycle, "step": "fetch+judge",
+                    ctx.timings.append({"cycle": cycle, "step": "fetch+judge",
                                           "s": round(t_fetch, 1)})
                     log.debug("[TEMPI] ciclo %s fetch+judge=%.1fs", cycle, t_fetch)
                     accepted_docs.extend(accepted)
                     _t_read = time.perf_counter()
-                    new_evs = await self._read_docs(question, cycle, accepted, subquestions)
+                    new_evs = await self._read_docs(ctx, question, cycle, accepted, subquestions)
                     evidences.extend(new_evs)
-                    self._stats["evidences"] += len(new_evs)
-                    self._timings.append({"cycle": cycle, "step": "read(LLM)",
+                    ctx.stats["evidences"] += len(new_evs)
+                    ctx.timings.append({"cycle": cycle, "step": "read(LLM)",
                                           "s": round(time.perf_counter() - _t_read, 1)})
                     log.debug("[TEMPI] ciclo %s read=%.1fs", cycle,
                               time.perf_counter() - _t_read)
-                    self.emit("evidence_extracted", cycle, count=len(new_evs),
+                    self.emit(ctx, "evidence_extracted", cycle, count=len(new_evs),
                               total=len(evidences))
-                    self._maybe_emit_usage()
+                    self._maybe_emit_usage(ctx)
                     # B5: check deadline per-ciclo (subito dopo il primo step pesante)
                     if cycle_deadline[0] and time.monotonic() > cycle_deadline[0]:
                         limit_note = (limit_note or
@@ -310,7 +323,7 @@ class Orchestrator:
                         stop_reason, stop_detail = "LIMITE_CICLO", (
                             f"budget per ciclo esaurito: {per_cycle_s}s al ciclo {cycle}")
                         log.debug("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
-                        self.emit("cycle_completed", cycle, complete=True,
+                        self.emit(ctx, "cycle_completed", cycle, complete=True,
                                   stop_reason=stop_reason, stop_detail=stop_detail)
                         break
 
@@ -321,7 +334,7 @@ class Orchestrator:
 
                 # ---- gap check (coverage decided in code) ----
                 _t_gap = time.perf_counter()
-                self.emit("gap_check_started", cycle)
+                self.emit(ctx, "gap_check_started", cycle)
                 for doc in accepted:
                     seen_urls.add(doc.url)
                     shared_state.add_url(doc.final_url or doc.url)
@@ -334,29 +347,29 @@ class Orchestrator:
                 gap_new_queries = list(report.new_queries)
                 report_status_by_id = dict(report.status_by_id)
                 report_covered_ids = set(report.covered_subquestions)
-                self._timings.append({"cycle": cycle, "step": "gap_check(LLM)",
+                ctx.timings.append({"cycle": cycle, "step": "gap_check(LLM)",
                                       "s": round(time.perf_counter() - _t_gap, 1)})
                 log.debug("[TEMPI] ciclo %s gap=%.1fs", cycle,
                           time.perf_counter() - _t_gap)
 
                 # ---- UNIQUE termination point ----
                 stop, stop_reason, stop_detail = self._should_stop(
-                    cycle=cycle, effective=effective, budget=budget,
+                    ctx=ctx, cycle=cycle, effective=effective, budget=budget,
                     gap_report=report, new_urls=new_urls,
                     new_domains=len({d for d in domains}),
                     shared_state=shared_state)
                 if stop:
                     log.debug("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
-                    self.emit("cycle_completed", cycle, complete=True,
+                    self.emit(ctx, "cycle_completed", cycle, complete=True,
                               stop_reason=stop_reason, stop_detail=stop_detail)
                     break
-                self.emit("gap_detected", cycle,
+                self.emit(ctx, "gap_detected", cycle,
                           missing=report.missing_subquestions,
                           partial=report.partial_subquestions,
                           status=report.status_by_id,
                           contradictions=report.contradictions,
                           new_queries=[q.model_dump() for q in report.new_queries])
-                self.emit("cycle_completed", cycle)
+                self.emit(ctx, "cycle_completed", cycle)
 
             # ---- writing ----
             if evidences and not cancel.is_set():
@@ -364,9 +377,9 @@ class Orchestrator:
                 out_lang = self.settings.report_language or language
                 log.debug("[WRITER] language=%s | evidenze totali=%s",
                           out_lang, len(evidences))
-                self.emit("writing_started", 0,
+                self.emit(ctx, "writing_started", 0,
                           note="Il bot sta ragionando su come impostare il report")
-                self._maybe_emit_usage()
+                self._maybe_emit_usage(ctx)
                 await asyncio.sleep(0.8)  # cede il loop: la UI vede la fase
                 limit_note = (limit_note if
                               stop_reason.startswith("LIMITE_") else
@@ -392,11 +405,11 @@ class Orchestrator:
                                            c.citation_no, c.evidence_ids)
                 # P0-1: la bozza viaggia sulla UI con un evento dedicato; il
                 # testo definitivo arriva solo dopo la verifica (report_final)
-                self.emit("report_chunk", 0, title=draft.title,
+                self.emit(ctx, "report_chunk", 0, title=draft.title,
                           markdown=draft.markdown, phase="draft")
 
                 # ---- verification ----
-                self.emit("verification_started", 0,
+                self.emit(ctx, "verification_started", 0,
                           note="Il bot sta ricontrollando ogni frase sulle fonti")
                 ev_map = {e.evidence_id: e for e in evidences}
                 src_map = {d.source_id: d for d in accepted_docs}
@@ -408,7 +421,7 @@ class Orchestrator:
                                                   c.corrected_text)
                     ev_name = {"VERIFIED": "claim_verified", "CORRECTED": "claim_corrected",
                                "REMOVED": "claim_removed"}.get(c.verdict, "claim_failed")
-                    self.emit(ev_name, 0, claim_id=c.claim_id, reason=c.verdict_reason)
+                    self.emit(ctx, ev_name, 0, claim_id=c.claim_id, reason=c.verdict_reason)
                 # update claims with verdict + unified final number (P0-2)
                 for c in verified.claims:
                     self.storage._exec(
@@ -419,7 +432,7 @@ class Orchestrator:
                 report_md = _final_markdown(draft.title, verified.markdown,
                                             verified.claims, evidences, src_map)
                 report_claims = verified.claims
-                self.emit("report_final", 0, title=draft.title,
+                self.emit(ctx, "report_final", 0, title=draft.title,
                           markdown=report_md,
                           verification={
                               "claims": verified.stats.number_of_claims,
@@ -436,7 +449,7 @@ class Orchestrator:
                 status = "failed"
                 error = ("nessuna evidenza raccolta: il motore di ricerca non ha "
                          "restituito risultati (provider rate-limitato o offline?)")
-                self.emit("run_failed", 0, error=error)
+                self.emit(ctx, "run_failed", 0, error=error)
             elif cancel.is_set():
                 status = "cancelled"
         except LimitReached as exc:
@@ -448,7 +461,7 @@ class Orchestrator:
             log.exception("run %s failed", run_id)
             status = "failed"
             error = f"{type(exc).__name__}: {exc}"
-            self.emit("run_failed", 0, error=error)
+            self.emit(ctx, "run_failed", 0, error=error)
 
         # ---- persist report / outcome ----
         md_path = json_path = None
@@ -469,18 +482,18 @@ class Orchestrator:
             "sources": len(accepted_docs),
             "evidences": len(evidences),
             "claims": len(report_claims),
-            "decisions": getattr(self.decisions, "counts", {}),
+            "decisions": getattr(decisions, "counts", {}),
             "stop_reason": stop_reason,
             "stop_detail": stop_detail,
-            "timings": self._timings,
+            "timings": ctx.timings,
         }
         # B5: tabella token/step per ciclo (aggregata dai timing + contatori LLM)
         by_cycle: dict[int, dict[str, float]] = {}
-        for row in self._timings:
+        for row in ctx.timings:
             c = by_cycle.setdefault(row["cycle"], {"seconds": 0.0})
             c["seconds"] += row.get("s", 0.0)
         for cyc, agg in sorted(by_cycle.items()):
-            agg["steps"] = sum(1 for r in self._timings if r["cycle"] == cyc)
+            agg["steps"] = sum(1 for r in ctx.timings if r["cycle"] == cyc)
         stats["per_cycle"] = by_cycle
         # usage counters (llm client counters are process-cumulative: exact in CLI,
         # approximate for a long-lived server sharing one client across runs)
@@ -489,8 +502,8 @@ class Orchestrator:
             llm_calls=getattr(self.llm, "llm_calls", 0),
             llm_tokens_in=getattr(self.llm, "tokens_in", 0),
             llm_tokens_out=getattr(self.llm, "tokens_out", 0),
-            laya_decisions=getattr(self.decisions, "counts", {}).get("laya", 0),
-            llm_decisions=getattr(self.decisions, "counts", {}).get("llm", 0),
+            laya_decisions=getattr(decisions, "counts", {}).get("laya", 0),
+            llm_decisions=getattr(decisions, "counts", {}).get("llm", 0),
         )
         # P1-9: limit_note only for REAL limits, never for normal termination
         real_limit = stop_reason.startswith("LIMITE_") or limit_note.startswith(
@@ -502,7 +515,7 @@ class Orchestrator:
         # P1-9: persistence errors must surface, not vanish
         self.storage._exec("UPDATE runs SET limits_json=? WHERE id=?",
                            (json.dumps(stats, ensure_ascii=False), run_id))
-        self.emit("run_completed" if status == "completed" else
+        self.emit(ctx, "run_completed" if status == "completed" else
                   ("run_cancelled" if status == "cancelled" else "run_failed"),
                   0, status=status, limit_note=limit_note if real_limit else "",
                   stop_reason=stop_reason)
@@ -524,7 +537,7 @@ class Orchestrator:
             doc.http_status, doc.content_type, doc.fetch_status.value,
             doc.published_at, doc.author, doc.redirects, doc.error, doc.byte_len)
 
-    async def _evaluate_docs(self, run_id, cycle, docs, question):
+    async def _evaluate_docs(self, run_id, cycle, docs, question, decisions, ctx):
         """Typed decisions per document: is_relevant + source_type + quality."""
         accepted = []
         pending = [d for d in docs
@@ -547,7 +560,7 @@ class Orchestrator:
         for doc in pending:
             state = f"QUESTION: {question}\n\nDOCUMENT ({doc.final_url or doc.url}):\n" \
                     f"{wrap_external(doc.text[:4000])}"
-            results = await self.decisions.decide_many(specs, state,
+            results = await decisions.decide_many(specs, state,
                                                        subject_kind="source",
                                                        subject_id=doc.source_id)
             relevant = bool(results[0].value) if results else True
@@ -557,20 +570,20 @@ class Orchestrator:
                                                   quality, results[0].confidence
                                                   if results else None, relevant)
             if not relevant:
-                self.emit("source_rejected", cycle, source_id=doc.source_id,
+                self.emit(ctx, "source_rejected", cycle, source_id=doc.source_id,
                           reason="not relevant")
                 continue
             if quality == 0:
-                self.emit("source_rejected", cycle, source_id=doc.source_id,
+                self.emit(ctx, "source_rejected", cycle, source_id=doc.source_id,
                           reason="low quality")
                 continue
-            self.emit("source_evaluated", cycle, source_id=doc.source_id,
+            self.emit(ctx, "source_evaluated", cycle, source_id=doc.source_id,
                       source_type=source_type, quality=quality,
                       relevance=results[0].confidence if results else None)
             accepted.append(doc)
         return accepted
 
-    async def _read_docs(self, question, cycle, accepted_docs, subquestions):
+    async def _read_docs(self, ctx, question, cycle, accepted_docs, subquestions):
         evidences = []
         budget = _MAX_EVIDENCES_PER_CYCLE
         per_source = max(1, self.settings.reader_chunks_per_source)
@@ -583,7 +596,7 @@ class Orchestrator:
                 if budget <= 0:
                     break
                 sq = subquestions[j % len(subquestions)] if subquestions else None
-                self.emit("source_reading", cycle, url=doc.final_url or doc.url,
+                self.emit(ctx, "source_reading", cycle, url=doc.final_url or doc.url,
                           subquestion=sq.text if sq else "")
                 found = await self.reader.extract_evidences(
                     question, sq.text if sq else "", ch,
@@ -591,24 +604,24 @@ class Orchestrator:
                     subquestion_id=sq.subquestion_id if sq else None)
                 self.storage.add_chunk(ch)
                 for e in found:
-                    e.run_id = self.run_id
+                    e.run_id = ctx.run_id
                     self.storage.add_evidence(e)
                     evidences.append(e)
                     budget -= 1
         return evidences
 
-    def _maybe_emit_usage(self) -> None:
+    def _maybe_emit_usage(self, ctx) -> None:
         """Throttled usage_update so the UI shows live counters."""
         now = time.monotonic()
-        if now - self._last_usage_emit < self.settings.usage_emit_every_s:
+        if now - ctx.last_usage_emit < self.settings.usage_emit_every_s:
             return
-        self._last_usage_emit = now
-        self.emit("usage_update", self._cycle,
+        ctx.last_usage_emit = now
+        self.emit(ctx, "usage_update", ctx.cycle,
                   llm_calls=getattr(self.llm, "llm_calls", 0),
                   tokens_in=getattr(self.llm, "tokens_in", 0),
                   tokens_out=getattr(self.llm, "tokens_out", 0),
-                  sources=self._stats["sources"],
-                  evidences=self._stats["evidences"])
+                  sources=ctx.stats["sources"],
+                  evidences=ctx.stats["evidences"])
 
     # ---------- export ----------
     def _export_json(self, run_id, question, path, report_md, claims, evidences):
