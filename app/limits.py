@@ -44,11 +44,18 @@ class RuntimeBudget:
 
 
 class DiskCache:
-    """Namespaced sha256-keyed file cache."""
+    """Namespaced sha256-keyed file cache with per-entry TTL (P2).
 
-    def __init__(self, cache_dir: Path | str, enabled: bool = True):
+    JSON entries store ``{"_ts": epoch, "data": ...}``; entries older than
+    ``ttl_s`` (0 = no expiry) read as a miss. Binary entries are unaffected
+    (fetch cache has its own freshness policy).
+    """
+
+    def __init__(self, cache_dir: Path | str, enabled: bool = True,
+                 ttl_s: int = 0):
         self.dir = Path(cache_dir)
         self.enabled = enabled
+        self.ttl_s = max(0, int(ttl_s))
         if enabled:
             self.dir.mkdir(parents=True, exist_ok=True)
 
@@ -80,13 +87,22 @@ class DiskCache:
             return None
         p = self._path(ns, key, ".json")
         try:
-            return json.loads(p.read_text("utf-8"))
+            data = json.loads(p.read_text("utf-8"))
         except (OSError, ValueError):
             return None
+        # P2: TTL on JSON entries ({_ts, data} envelope; legacy raw values pass)
+        if (isinstance(data, dict) and "_ts" in data and "data" in data
+                and self.ttl_s > 0):
+            if time.time() - float(data["_ts"]) > self.ttl_s:
+                return None  # expired -> cache miss
+            return data["data"]
+        return data
 
     def set_json(self, ns: str, key: str, value: object) -> None:
         if not self.enabled:
             return
         p = self._path(ns, key, ".json")
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(value, ensure_ascii=False), "utf-8")
+        payload = ({"_ts": time.time(), "data": value}
+                   if self.ttl_s > 0 else value)
+        p.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")

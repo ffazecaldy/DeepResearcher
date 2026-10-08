@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     db_path: Path = Path("data/deep_researcher.db")
     cache_enabled: bool = True
     cache_dir: Path = Path("data/cache")
+    cache_ttl_s: int = 86400  # P2: TTL entries JSON cache (0 = no expiry)
 
     # Comma-separated domain blocklist
     domain_blocklist: str = ""

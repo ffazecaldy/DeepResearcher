@@ -32,7 +32,8 @@ def build_orchestrator(settings: Settings | None = None, bus: EventBus | None = 
 
     from app.agent.fetcher import Fetcher
     from app.agent.searcher import Searcher
-    cache = DiskCache(settings.cache_dir, settings.cache_enabled)
+    cache = DiskCache(settings.cache_dir, settings.cache_enabled,
+                      ttl_s=getattr(settings, "cache_ttl_s", 0))
     fetcher = Fetcher(settings, cache)
     searcher = Searcher(search, cache, settings)
 
