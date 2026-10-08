@@ -87,7 +87,17 @@ class Storage:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Idempotent migrations for DBs created by older versions (the
+        CREATE TABLE IF NOT EXISTS never alters existing tables)."""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(claims)")}
+        if "final_citation_no" not in cols:
+            self._conn.execute(
+                "ALTER TABLE claims ADD COLUMN final_citation_no INTEGER")
+        # future migrations go here, each guarded by a PRAGMA table_info check
 
     def close(self) -> None:
         self._conn.close()
