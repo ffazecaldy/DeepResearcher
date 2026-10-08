@@ -200,10 +200,16 @@ class Orchestrator:
                     # ids are only unique within a plan: prefix with run_id
                     # (SQLite PKs are table-global, runs share the DB)
                     prefix = run_id[:24]
+                    # P1-5: remap query.subquestion_id to the prefixed ids so
+                    # the persisted chain subquestion->query stays joinable
+                    remap = {}
                     for i, sq in enumerate(plan.subquestions, start=1):
-                        sq.subquestion_id = f"{prefix}_sq{i}"
+                        remap[sq.subquestion_id] = f"{prefix}_sq{i}"
+                        sq.subquestion_id = remap[sq.subquestion_id]
                     for i, q in enumerate(plan.queries, start=1):
                         q.query_id = f"{prefix}_q{i}"
+                        q.subquestion_id = remap.get(q.subquestion_id,
+                                                     q.subquestion_id)
                     subquestions = plan.subquestions
                     for sq in subquestions:
                         self.storage.add_subquestion(run_id, sq.subquestion_id,
@@ -248,11 +254,24 @@ class Orchestrator:
                     queries = queries[:self.settings.max_queries_per_cycle]
                     for q in queries:
                         shared_state.see_query(q.text)
+                        # P1-5: queries of later cycles are persisted too
+                        self.storage.add_query(
+                            run_id, q.query_id, q.subquestion_id, q.text, cycle,
+                            self.settings.search_provider.value)
                 log.debug("[CICLO %s/%s] query: %s", cycle, effective,
                           [q.text for q in queries])
                 self.emit(ctx, "query_started", cycle, count=len(queries))
                 items = await self.searcher.run_queries(
                     queries, self.settings.max_pages_per_query)
+                # P1-5: persist query -> result links (multiple queries may hit
+                # the same URL: every pair is stored, never collapsed)
+                for q in queries:
+                    pos = 0
+                    for it in items:
+                        if it.query_id == q.query_id:
+                            self.storage.add_search_result(
+                                run_id, q.query_id, it.url, it.url, it.title, pos)
+                            pos += 1
                 items = [it for it in items
                          if it.url not in seen_urls]  # no re-reads across cycles
                 # B4: scala di novità — prima i dominio-nuovi, poi i già-visti

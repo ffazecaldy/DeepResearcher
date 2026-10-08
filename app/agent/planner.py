@@ -146,15 +146,21 @@ class Planner:
         if not isinstance(queries, list) or not queries:
             raise PlannerError("plan JSON missing non-empty 'queries'")
 
-        # deterministic ids: model ids are ignored and rewritten here
+        # deterministic ids: model ids are IGNORED for subquestions, but each
+        # query's subquestion_id is resolved from the MODEL's own id space
+        # BEFORE rewriting (P1-5: a valid model id must not fall back to sq1).
         sub_models: list[SubQuestion] = []
-        id_by_text: dict[str, str] = {}
+        id_by_text: dict[str, str] = {}      # normalized text -> normalized id
+        model_id_to_norm: dict[str, str] = {}  # model id -> normalized id
         for i, s in enumerate(subqs):
             if not isinstance(s, dict) or not str(s.get("text", "")).strip():
                 continue
             text = str(s["text"]).strip()
+            model_raw = str(s.get("subquestion_id", f"sq{i + 1}")).strip()
             sid = f"sq{i + 1}"
-            id_by_text[text] = sid
+            id_by_text[text.lower()] = sid
+            model_id_to_norm[model_raw] = sid
+            model_id_to_norm[model_raw.lower()] = sid
             sub_models.append(SubQuestion(subquestion_id=sid, text=text, idx=i + 1))
         if not sub_models:
             raise PlannerError("plan has no valid subquestions")
@@ -168,13 +174,20 @@ class Planner:
             if not text:
                 continue
             sq_raw = str(q.get("subquestion_id", "")).strip()
-            sid = id_by_text.get(sq_raw) or id_by_text.get(sq_raw.lower()) or ""
+            # 1) model id (exact or case-insensitive) -> normalized id
+            sid = (model_id_to_norm.get(sq_raw)
+                   or model_id_to_norm.get(sq_raw.lower()) or "")
+            # 2) reference by exact subquestion text
             if sid == "":
-                # match by subquestion order if the model referenced an unknown id
+                sid = id_by_text.get(sq_raw.lower(), "")
+            # 3) positional hint, else first (logged, never silent)
+            if sid == "":
                 order = q.get("_order")
                 if isinstance(order, int) and 1 <= order <= len(sub_models):
                     sid = sub_models[order - 1].subquestion_id
                 else:
+                    log.warning("planner: query %r references unknown "
+                                "subquestion_id %r -> sq1", text[:40], sq_raw)
                     sid = sub_models[0].subquestion_id
             n += 1
             gen.append(GeneratedQuery(query_id=f"q{n}", subquestion_id=sid,
