@@ -102,7 +102,7 @@ class Orchestrator:
         self.bus.publish(Event(type=type_, run_id=ctx.run_id, cycle=cycle,
                                payload=payload))
 
-    def _snowball_queries(self, cycle: int, seen_urls: set[str]):
+    def _snowball_queries(self, ctx, cycle: int, seen_urls: set[str]):
         """B4: i candidate snowball diventano query "site-direct" (URL fetch).
 
         Priorità bassissima: entrano DOPO gen_queries e gap_new_queries e solo
@@ -114,7 +114,7 @@ class Orchestrator:
         out = []
         for url in ctx.snowball.take_pending(seen_norm):
             out.append(GeneratedQuery(
-                query_id=f"{self.run_id[:24]}_sb{cycle}_{len(out) + 1}",
+                query_id=f"{ctx.run_id[:24]}_sb{cycle}_{len(out) + 1}",
                 subquestion_id="", text=url, cycle=cycle))
             seen_norm.add(normalize_for_dedupe(url))
         return out
@@ -241,7 +241,7 @@ class Orchestrator:
                              + [_as_query(ctx.run_id, q.subquestion_id, q.text,
                                           cycle, i)
                                 for i, q in enumerate(gap_new_queries)]
-                             + ctx.snowball_queries(cycle, seen_urls))
+                             + self._snowball_queries(ctx, cycle, seen_urls))
                     seen_texts = set()
                     queries = []
                     for q in all_q:

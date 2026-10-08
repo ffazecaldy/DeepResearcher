@@ -51,3 +51,24 @@ def test_snowball_skips_already_seen_urls():
     st.propose("https://seen.example/a")
     out = st.take_pending(already_seen_norm={"https://seen.example/a"})
     assert out == []
+
+
+def test_orchestrator_snowball_queries_method_uses_ctx(tmp_path):
+    """Regressione: il refactor P0-4 aveva rinominato _snowball_queries in
+    ctx.snowball_queries (metodo inesistente) -> crash al ciclo 2 quando la
+    state ha candidate. Il metodo esiste e usa ctx.snowball/ctx.run_id."""
+    import asyncio
+    import tempfile
+    from app.agent.orchestrator import Orchestrator, RunContext
+
+    async def _go():
+        st = SnowballState()
+        st.propose("https://primary.example/studio")
+        ctx = RunContext(run_id="run_sbtest", snowball=st)
+        orch = Orchestrator.__new__(Orchestrator)  # no deps needed for this method
+        out = orch._snowball_queries(ctx, cycle=2, seen_urls=set())
+        assert len(out) == 1
+        assert out[0].text == "https://primary.example/studio"
+        assert out[0].query_id.startswith("run_sbtest_sb2")
+
+    asyncio.run(_go())
