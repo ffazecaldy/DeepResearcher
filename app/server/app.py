@@ -144,7 +144,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"run {run_id} non trovato")
         storage.delete_run(run_id)
         return DeleteResponse()
-
     @app.delete("/api/runs")
     async def clear_runs() -> DeleteResponse:
         """Wipe the whole history (active runs are cancelled first)."""
@@ -170,24 +169,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def run_events(run_id: str, request: Request) -> StreamingResponse:
         if storage.get_run(run_id) is None:
             raise HTTPException(404, f"run {run_id} non trovato")
+        handle = app.state.runs.get(run_id)
+        done_before = (handle is None or handle.outcome is not None
+                       or (handle.task is not None and handle.task.done()))
         rows = storage.events_for_run(run_id)
+        # P1-10: subscribe BEFORE the replay snapshot — no event can fall in the
+        # gap; duplicates (already replayed) are skipped by seq tracking below.
+        queue = bus.subscribe(run_id) if not done_before else None
 
         async def stream() -> AsyncIterator[str]:
             seq = 0
-            yield _sse("replay_start", run_id, time.time(), 0,
-                       {"count": len(rows)}, 0)
-            handle = app.state.runs.get(run_id)
-            queue = bus.subscribe(run_id) if handle is not None else None
             try:
+                yield _sse("replay_start", run_id, time.time(), 0,
+                           {"count": len(rows)}, 0)
                 for row in rows:
                     seq += 1
                     yield _sse(row["type"], run_id, row["ts"], row["cycle"] or 0,
                                json.loads(row["payload_json"] or "{}"), seq)
-                done = (handle is None or handle.outcome is not None
-                        or (handle.task is not None and handle.task.done()))
-                if not done and queue is not None:
+                if queue is not None:
                     while True:
-                        if request.is_disconnected():
+                        if await request.is_disconnected():
                             return
                         try:
                             ev = await asyncio.wait_for(queue.get(), timeout=15)
@@ -199,14 +200,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                    ev.payload, seq)
                         if ev.type in _FINAL_EVENTS:
                             break
-                # drain anything queued between replay and completion
-                while queue is not None:
-                    try:
-                        ev = queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    seq += 1
-                    yield _sse(ev.type, run_id, ev.ts, ev.cycle, ev.payload, seq)
+                    # drain anything queued between replay and completion
+                    while True:
+                        try:
+                            ev = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        seq += 1
+                        yield _sse(ev.type, run_id, ev.ts, ev.cycle, ev.payload, seq)
                 seq += 1
                 yield _sse("run_closed", run_id, time.time(), 0, {}, seq)
             finally:
