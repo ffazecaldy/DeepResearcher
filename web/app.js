@@ -301,6 +301,7 @@ function renderPlan(p) {
 }
 
 function handleEvent(ev) {
+  setPhase(ev.type);
   const { type, cycle, payload } = ev;
   const p = payload || {};
   // B1: dedup eventi (replay + live possono sovrapporsi): id sequenziale per run
@@ -337,6 +338,10 @@ function handleEvent(ev) {
   }
   if (type === "report_final" && p.markdown) {
     renderReport(p.markdown);  // verified text replaces the draft
+    // riga statistiche verifica (P0-1 payload: claims/verified/corrected/removed/failed/uncovered)
+    if (p.verification) renderVerifyStats(p.verification);
+    const cb = $("coherence-btn");
+    if (cb) cb.hidden = false;
   }
   if (type === "run_completed") {
     // B1: "completata con N avvisi" quando ci sono verifiche fallite
@@ -412,6 +417,92 @@ function collapseActivity() {
 }
 
 /* ============================== statusbar ============================== */
+/* ── stepper fasi ────────────────────────────────────────────────────── */
+const PHASES = ["piano", "ricerca", "lettura", "scrittura", "verifica"];
+const PHASE_EVENTS = {
+  planning_started: "piano", plan_generated: "piano",
+  query_started: "ricerca", search_result_found: "ricerca",
+  source_reading: "lettura", evidence_extracted: "lettura",
+  writing_started: "scrittura", report_chunk: "scrittura",
+  verification_started: "verifica", report_final: "verifica",
+};
+function setPhase(type) {
+  const ph = PHASE_EVENTS[type];
+  if (!ph) return;
+  const idx = PHASES.indexOf(ph);
+  document.querySelectorAll("#phase-stepper .step").forEach((el, i) => {
+    el.classList.toggle("active", i === idx);
+    el.classList.toggle("done", i < idx);
+  });
+}
+function resetStepper() {
+  document.querySelectorAll("#phase-stepper .step").forEach((el) => {
+    el.classList.remove("active", "done");
+  });
+}
+
+/* ── riga statistiche verifica ───────────────────────────────────────── */
+function renderVerifyStats(v) {
+  const el = $("verify-stats");
+  if (!el || !v) return;
+  el.hidden = false;
+  el.innerHTML =
+    `<span class="vs ok">&#10003; ${v.verified ?? 0} verificate</span>` +
+    `<span class="vs fix">&#9998; ${v.corrected ?? 0} corrette</span>` +
+    `<span class="vs rem">&#128465; ${v.removed ?? 0} rimosse</span>` +
+    ((v.failed ?? 0) ? `<span class="vs bad">&#9888; ${v.failed} fallite</span>` : "") +
+    ((v.uncovered ?? 0) ? `<span class="vs bad">&#9888; ${v.uncovered} non coperte</span>` : "");
+}
+
+/* ── pannello coerenza ───────────────────────────────────────────────── */
+async function runCoherence() {
+  if (!state.runId) return;
+  const panel = $("coherence-panel");
+  if (!panel) return;
+  panel.hidden = false;
+  panel.className = "coherence c-warn";
+  panel.innerHTML = '<div class="coherence-head"><span class="c-badge">controllo in corso…</span></div>';
+  try {
+    const r = await apiJson(`/api/runs/${state.runId}/coherence`);
+    renderCoherence(r);
+  } catch (err) {
+    panel.innerHTML = `<div class="coherence-head"><span class="c-badge">errore</span></div>` +
+      `<p class="dim">Controllo coerenza non disponibile: ${escapeHtml(err.message)}</p>`;
+  }
+}
+function renderCoherence(r) {
+  const panel = $("coherence-panel");
+  if (!panel) return;
+  panel.hidden = false;
+  panel.className = r.passed ? "coherence c-ok" : "coherence c-warn";
+  const TYPE_LABEL = {
+    uncovered: "non coperta", unsupported: "non supportata",
+    contradiction: "contraddetta", numero_non_supportato: "numero inventato",
+    unknown_url: "URL ignoto",
+  };
+  const parts = [`<div class="coherence-head"><span class="c-badge">${
+    r.passed ? "coerente" : `${r.issues.length} problemi`}</span>` +
+    `<span class="cr">${r.checked_sentences} frasi analizzate</span></div>`];
+  if (r.issues && r.issues.length) {
+    parts.push("<ul>");
+    for (const i of r.issues) {
+      parts.push(`<li><b class="ct t-${escapeHtml(i.type)}">${escapeHtml(TYPE_LABEL[i.type] || i.type)}</b>` +
+        `${escapeHtml((i.sentence || "").slice(0, 120))}` +
+        `<span class="cr"> — ${escapeHtml((i.reason || "").slice(0, 140))}</span></li>`);
+    }
+    parts.push("</ul>");
+  }
+  panel.innerHTML = parts.join("");
+}
+
+/* ── filtro cronologia ───────────────────────────────────────────────── */
+function applyHistoryFilter() {
+  const q = ($("history-filter")?.value || "").toLowerCase().trim();
+  document.querySelectorAll("#history-list li").forEach((li) => {
+    li.hidden = q && !(li.dataset.q || "").includes(q);
+  });
+}
+
 function setStatus(s) {
   state.status = s;
   const el = $("sb-state");
@@ -549,6 +640,19 @@ async function loadReportJson() {
   if (state.reportJson) return state.reportJson;
   try {
     state.reportJson = await apiJson(`/api/runs/${state.runId}/report.json`);
+    // run storico: mostra coerenza + stats verifica dai dati del DB
+    const cb = $("coherence-btn");
+    if (cb && state.reportJson.report_markdown) cb.hidden = false;
+    if (state.reportJson.verifications) {
+      const by = {};
+      for (const v of state.reportJson.verifications)
+        by[v.verdict] = (by[v.verdict] || 0) + 1;
+      renderVerifyStats({
+        verified: by.VERIFIED || 0, corrected: by.CORRECTED || 0,
+        removed: by.REMOVED || 0, failed: by.FAILED || 0,
+        uncovered: 0,
+      });
+    }
   } catch (e) {
     if (String(e.message).startsWith("404")) {
       return { claims: [], evidences: [], sources: [], verifications: [],
@@ -604,11 +708,13 @@ async function refreshHistory() {
       if (li.dataset.sig !== `${r.status}|${date}`) {
         li.innerHTML = html;
         li.dataset.sig = `${r.status}|${date}`;
+        li.dataset.q = (r.question || "").toLowerCase();
         wireHistoryItem(li, r);
       }
     } else {
       li = document.createElement("li");
       li.dataset.runId = r.id;
+      li.dataset.q = (r.question || "").toLowerCase();
       li.dataset.sig = `${r.status}|${date}`;
       li.innerHTML = html;
       wireHistoryItem(li, r);
@@ -753,6 +859,13 @@ function resetPanels() {
   if (ri) ri.hidden = true;
   const ct = $("cycle-tabs");
   if (ct) ct.innerHTML = "";
+  resetStepper();
+  const cb = $("coherence-btn");
+  if (cb) cb.hidden = true;
+  const cp = $("coherence-panel");
+  if (cp) { cp.hidden = true; cp.innerHTML = ""; }
+  const vs = $("verify-stats");
+  if (vs) { vs.hidden = true; vs.innerHTML = ""; }
   state.cycle = null;
   state.counters = { sources: 0, evidence: 0, queries: 0, claims: 0,
                      tokens: 0, llm: 0 };
@@ -842,6 +955,8 @@ function init() {
   $("stop-btn").addEventListener("click", stopRun);
   $("popover-close").addEventListener("click", closePopover);
   $("history-clear").addEventListener("click", clearHistory);
+  $("coherence-btn").addEventListener("click", runCoherence);
+  $("history-filter").addEventListener("input", applyHistoryFilter);
   // header "Nuova ricerca" = reset visibile di modulo e pannelli
   const formReset = $("form-reset");
   formReset.addEventListener("click", () => {

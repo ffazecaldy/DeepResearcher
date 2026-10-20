@@ -76,7 +76,7 @@
             <select id="depth">
               <option value="rapida">Rapida (1 ciclo)</option>
               <option value="standard" selected>Standard (3 cicli)</option>
-              <option value="approfondita">Approfondita (5 cicli)</option>
+              <option value="approfondita">Approfondita (8 cicli)</option>
             </select>
           </div>
           <div class="fld">
@@ -109,6 +109,11 @@
           <span id="history-count" class="badge">0</span>
         </span>
       </div>
+      <div class="hist-search">
+        <svg class="ic s12"><use href="#i-search"/></svg>
+        <input id="history-filter" type="search" placeholder="Filtra cronologia…"
+               autocomplete="off" aria-label="Filtra cronologia">
+      </div>
       <ul id="history-list" class="history" role="list"></ul>
     </section>
   </aside>
@@ -139,6 +144,15 @@
       <span id="action-text" class="mono">in attesa</span>
       <span id="cycle-tabs" class="cycle-tabs" aria-label="Cicli in attività"></span>
     </div>
+
+    <!-- stepper fasi: piano -> ricerca -> lettura -> scrittura -> verifica -->
+    <ol id="phase-stepper" class="stepper" aria-label="Fase corrente">
+      <li data-phase="piano" class="step"><span class="sdot"></span>piano</li>
+      <li data-phase="ricerca" class="step"><span class="sdot"></span>ricerca</li>
+      <li data-phase="lettura" class="step"><span class="sdot"></span>lettura</li>
+      <li data-phase="scrittura" class="step"><span class="sdot"></span>scrittura</li>
+      <li data-phase="verifica" class="step"><span class="sdot"></span>verifica</li>
+    </ol>
 
     <section class="panel grow" aria-label="Attivita in tempo reale">
       <div class="ph">
@@ -179,7 +193,14 @@
       <div class="ph">
         <svg class="ic"><use href="#i-file"/></svg>
         <span class="ttl">Report</span>
+        <span class="acts">
+          <span id="verify-stats" class="verify-stats" hidden></span>
+          <button id="coherence-btn" class="hbtn" type="button" hidden
+                  title="Controllo anti-baggianate: numeri, URL e frasi supportate dalle fonti">
+            <svg class="ic s12"><use href="#i-check"/></svg>coerenza</button>
+        </span>
       </div>
+      <div id="coherence-panel" class="coherence" hidden></div>
       <div id="report" class="pb report">
         <div class="report-empty">
           <svg class="ic s24"><use href="#i-file"/></svg>

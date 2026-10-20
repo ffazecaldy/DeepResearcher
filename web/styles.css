@@ -322,6 +322,58 @@ html[data-theme="light"] button.citation:hover{color:#fffaf0}
 .server-banner .hbtn{border-color:#fff;color:#fff}
 .server-banner .hbtn:hover{border-color:#fff;color:#fff;background:rgba(0,0,0,.15)}
 
+/* ── stepper fasi ────────────────────────────────────────────────────── */
+.stepper{display:flex;gap:2px;list-style:none;margin:0 0 6px;padding:0;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
+.stepper .step{flex:1;display:flex;align-items:center;gap:6px;padding:5px 8px;
+  border:1px solid var(--line);color:var(--faint)}
+.stepper .step:first-child{border-radius:4px 0 0 4px}
+.stepper .step:last-child{border-radius:0 4px 4px 0}
+.stepper .step+.step{border-left:none}
+.stepper .sdot{width:6px;height:6px;border-radius:50%;background:var(--faint);opacity:.4;flex:none}
+.stepper .step.done{color:var(--gain)}
+.stepper .step.done .sdot{background:var(--gain);opacity:1}
+.stepper .step.active{color:var(--amber);border-color:var(--amber-dk);
+  background:var(--amber-soft)}
+.stepper .step.active .sdot{background:var(--amber);opacity:1;
+  animation:pulse 1.2s ease-in-out infinite}
+
+/* ── pannello coerenza ──────────────────────────────────────────────── */
+.coherence{margin:0;padding:8px 12px;border-bottom:1px solid var(--line);
+  font-size:12px;max-height:180px;overflow:auto}
+.coherence.c-ok{border-left:3px solid var(--gain)}
+.coherence.c-warn{border-left:3px solid var(--warn)}
+.coherence-head{display:flex;gap:8px;align-items:center;margin-bottom:6px;
+  font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+.coherence-head .c-badge{padding:2px 8px;border:1px solid;border-radius:4px}
+.coherence.c-ok .c-badge{color:var(--gain);border-color:var(--gain)}
+.coherence.c-warn .c-badge{color:var(--warn);border-color:var(--warn)}
+.coherence ul{margin:4px 0 0;padding:0;list-style:none}
+.coherence li{padding:3px 0;border-top:1px dashed var(--line)}
+.coherence li b.ct{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;
+  letter-spacing:.05em;margin-right:6px}
+.coherence li b.ct.t-uncovered{color:var(--warn)}
+.coherence li b.ct.t-unsupported,
+.coherence li b.ct.t-contradiction,
+.coherence li b.ct.t-numero_non_supportato{color:var(--loss)}
+.coherence li b.ct.t-unknown_url{color:var(--warn)}
+.coherence .cr{color:var(--faint)}
+
+/* ── riga statistiche verifica ──────────────────────────────────────── */
+.verify-stats{display:inline-flex;gap:8px;font-family:var(--mono);font-size:10px}
+.verify-stats .vs{white-space:nowrap}
+.verify-stats .vs.ok{color:var(--gain)}
+.verify-stats .vs.fix{color:var(--amber)}
+.verify-stats .vs.rem{color:var(--faint)}
+.verify-stats .vs.bad{color:var(--loss)}
+
+/* ── filtro cronologia ──────────────────────────────────────────────── */
+.hist-search{display:flex;align-items:center;gap:6px;padding:6px 10px;
+  border-bottom:1px solid var(--line);color:var(--faint)}
+.hist-search input{flex:1;background:none;border:none;outline:none;
+  color:var(--fg);font:inherit;font-size:12px}
+.hist-search input::placeholder{color:var(--faint)}
+
 /* ── popover citazione ──────────────────────────────────────────────────── */
 .popover{flex:none}
 /* B1-fix3: niente max-height vh rigido: il pannello destro ha già la sua
