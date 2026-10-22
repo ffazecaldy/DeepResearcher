@@ -97,6 +97,10 @@ class FetchedDocument(BaseModel):
     fetch_status: FetchStatus = FetchStatus.FETCH_FAILED
     error: str | None = None
     byte_len: int = 0
+    # sha256 del testo normalizzato (lowercase, spazi collassati, 200k char):
+    # identifica il CONTENUTO per la dedup (stesso testo su URL diversi =
+    # non fonti indipendenti). Vuoto se il testo non è estraibile.
+    content_hash: str = ""
 
 
 class Chunk(BaseModel):

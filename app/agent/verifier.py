@@ -14,6 +14,8 @@ log = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 _VALID_VERDICTS = {"VERIFIED", "WEAKENED", "CORRECTED", "REMOVED", "FAILED"}
+_VALID_SUPPORT = {"supported", "contradicted", "insufficient", "mixed"}
+_SUPPORT_REASON = "evidenza contraddice"
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 _CITE_TOKEN = re.compile(r"\[\d+\]")
 _TRAILING_PUNCT = re.compile(r"[.!?…]+")
@@ -149,6 +151,16 @@ def _extract_json_object(text: str) -> dict:
 
 
 class Verifier:
+    """Checks every claim against its cited evidence.
+
+    Support-state convention: the LLM also returns an explicit support state
+    (supported | contradicted | insufficient | mixed). It is NOT stored on
+    ReportClaim (models.py is frozen): it is recorded as a structured prefix
+    in `claim.verdict_reason` -> "[support:contradicted] motivo ...".
+    Consumers must parse the prefix, never free text. Default when the LLM
+    omits it: "insufficient". support=contradicted on a VERIFIED claim
+    degrades the verdict to WEAKENED (evidence outweighs the model's ok).
+    """
     def __init__(self, llm, prompts_dir: Path | None = None,
                  max_concurrency: int = 3):
         self._llm = llm
@@ -176,7 +188,8 @@ class Verifier:
 
     async def _llm_verdict(self, system_tpl: str, user_tpl: str,
                            question: str, claim: ReportClaim,
-                           ev_map: dict[str, Evidence]) -> tuple[Verdict, str, str | None]:
+                           ev_map: dict[str, Evidence]
+                           ) -> tuple[Verdict, str, str | None, str]:
         ev_json = json.dumps(
             [{"evidence_id": eid, "claim": ev_map[eid].claim,
               "quote": ev_map[eid].quote[:300]}
@@ -189,16 +202,23 @@ class Verifier:
         verdict = str(data.get("verdict", "")).upper()
         if verdict not in _VALID_VERDICTS:
             raise ValueError(f"invalid verdict: {verdict!r}")
+        # support state (explicit verification states): default "insufficient"
+        # when absent or invalid — never fail a whole verification for it.
+        support = str(data.get("support", "insufficient")).strip().lower()
+        if support not in _VALID_SUPPORT:
+            log.debug("verifier: invalid support %r -> insufficient", support)
+            support = "insufficient"
         reason = str(data.get("reason", ""))
         corrected = data.get("corrected_text")
         corrected = str(corrected).strip() if corrected else None
-        return verdict, reason, corrected  # type: ignore[return-value]
+        return verdict, reason, corrected, support  # type: ignore[return-value]
 
     async def verify(self, question: str, draft: DraftReport,
                      ev_map: dict[str, Evidence],
                      sources: dict[str, FetchedDocument]) -> VerifiedReport:
         system_tpl, user_tpl = self._load()
         markdown = draft.markdown
+        support_counts = {s: 0 for s in sorted(_VALID_SUPPORT)}
         async def one(claim: ReportClaim) -> ReportClaim:
             nonlocal markdown
             if not claim.evidence_ids or any(e not in ev_map for e in claim.evidence_ids):
@@ -210,7 +230,7 @@ class Verifier:
             bad_numbers = self._unsupported_numbers(claim, ev_map)
             async with self._sem:  # bounded concurrency: providers rate-limit bursts
                 try:
-                    verdict, reason, corrected = await self._llm_verdict(
+                    verdict, reason, corrected, support = await self._llm_verdict(
                         system_tpl, user_tpl, question, claim, ev_map)
                 except Exception as exc:
                     log.warning("verifier: LLM check failed on %s: %s",
@@ -222,7 +242,7 @@ class Verifier:
             if verdict == "CORRECTED" and not (corrected or "").strip():
                 for _retry in range(2):
                     try:
-                        verdict, reason, corrected = await self._llm_verdict(
+                        verdict, reason, corrected, support = await self._llm_verdict(
                             system_tpl, user_tpl, question, claim, ev_map)
                         if (corrected or "").strip():
                             break
@@ -240,7 +260,15 @@ class Verifier:
                 verdict = "WEAKENED"
                 reason = (f"numeric values {sorted(bad_numbers)} not present in "
                           f"quoted evidence; " + reason)
-            claim.verdict, claim.verdict_reason = verdict, reason
+            if support == "contradicted" and verdict == "VERIFIED":
+                # lo stato di verifica esplicito prevale: l'evidenza nega la
+                # affermazione, un VERIFIED non e' credibile -> WEAKENED
+                verdict, reason = "WEAKENED", _SUPPORT_REASON
+            # convenzione [support:X]: prefisso strutturato su verdict_reason
+            # (vedi docstring di Verifier; models.py e' congelato)
+            claim.verdict, claim.verdict_reason = (
+                verdict, f"[support:{support}] {reason}".strip())
+            support_counts[support] += 1
             if verdict == "CORRECTED" and corrected:
                 new_md = _replace_claim(markdown, claim.text, corrected)
                 if new_md is None and _fuzzy_find(markdown, claim.text):
@@ -267,6 +295,13 @@ class Verifier:
             return claim
 
         claims = list(await asyncio.gather(*(one(c) for c in draft.claims)))
+
+        # aggregazione stati di verifica espliciti (log + base per support_stats)
+        total_support = sum(support_counts.values())
+        if total_support:
+            summary = ", ".join(f"{k}={v}" for k, v in support_counts.items())
+            log.info("verifier: support stats (%d claims): %s",
+                     total_support, summary)
 
         stats = VerificationStats(number_of_claims=len(claims))
         for c in claims:

@@ -51,6 +51,12 @@ class SearchState:
     domain_count: dict[str, int] = field(default_factory=dict)
     attempts_by_sq: dict[str, int] = field(default_factory=dict)
     evidence_count: int = 0
+    # B6: memoria delle fonti gia' lette nel run, per il riuso dei chunk:
+    # source_id -> {"url","final_url","title","domain","cycle"}
+    read_sources: dict[str, dict] = field(default_factory=dict)
+    # source_id -> sotto-domande per cui i chunk della fonte hanno GIA'
+    # prodotto evidenze (il riuso non ripete lo stesso angolo)
+    used_sq_by_source: dict[str, set[str]] = field(default_factory=dict)
 
     def norm_url(self, url: str) -> str:
         return normalize_for_dedupe(url)

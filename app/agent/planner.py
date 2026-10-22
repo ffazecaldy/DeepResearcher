@@ -15,6 +15,15 @@ _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 _JACCARD_THRESHOLD = 0.8
 _TOKEN_RE = re.compile(r"[\w']+", re.UNICODE)
 
+# Guardia anti-bias (ciclo 1): se la domanda contiene un presupposto, le query
+# devono verificarne ANCHE il contrario (query di controevidenza). Solo qui:
+# i cicli >= 2 usano QueryGenerator, che ha gia' le proprie angolazioni.
+_ANTIBIAS_RULE = (
+    "GUARDIA ANTI-BIAS: se la domanda contiene un presupposto (un'affermazione "
+    "data per scontata), le query devono verificare ANCHE il contrario del "
+    "presupposto. Quando pertinente, includi almeno una query di "
+    "controevidenza che cerchi attivamente fonti che lo smentiscano.")
+
 
 class PlannerError(RuntimeError):
     """The planner could not obtain a valid plan JSON after the repair retry."""
@@ -117,6 +126,9 @@ class Planner:
         system_tpl, user_tpl = self._load()
         user = user_tpl.format(question=question, language=language,
                                max_subquestions=max_subquestions)
+        # rinforzo esplicito della guardia nel prompt: vive nel prompt.txt ma
+        # qui e' garantita a prescindere dal template in uso (ciclo 1 only)
+        user = f"{user}\n\n{_ANTIBIAS_RULE}"
 
         raw = await self._llm.complete(system_tpl, user, force_json=True)
         data = None

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
 import time
 import urllib.robotparser
 from urllib.parse import urljoin, urlsplit
@@ -18,6 +20,22 @@ from app.security import validate_public_http_url
 log = logging.getLogger(__name__)
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+_HASH_MAX_CHARS = 200_000
+
+
+def content_fingerprint(text: str) -> str:
+    """sha256 del testo normalizzato per la dedup per CONTENUTO.
+
+    Normalizzazione: lowercase, ogni sequenza di whitespace collassata a un
+    singolo spazio, trim, primi 200k caratteri. Due pagine con lo stesso
+    testo su URL diversi producono lo stesso hash (non fonti indipendenti).
+    Restituisce "" per testo vuoto/solo spazi.
+    """
+    norm = re.sub(r"\s+", " ", text.lower()).strip()[:_HASH_MAX_CHARS]
+    if not norm:
+        return ""
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
 
 class Fetcher:
@@ -198,5 +216,11 @@ class Fetcher:
             doc.fetch_status = FetchStatus.PARTIAL_CONTENT
         else:
             doc.fetch_status = FetchStatus.SUCCESS
+        if doc.fetch_status in (FetchStatus.SUCCESS, FetchStatus.PARTIAL_CONTENT):
+            # dedup per contenuto: un errore di hash non deve mai bloccare il fetch
+            try:
+                doc.content_hash = content_fingerprint(doc.text)
+            except Exception:
+                doc.content_hash = ""
         self._to_cache(doc)
         return doc

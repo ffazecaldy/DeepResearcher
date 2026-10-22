@@ -178,6 +178,24 @@ async def test_full_pipeline_mock(tmp_path, monkeypatch):
                      "claim_verified", "run_completed"):
         assert expected in ev_types, expected
 
+    # B6: evento di contributo del ciclo nel DB + numeri negli stats persistiti
+    assert "cycle_contribution" in ev_types
+    contrib = [e for e in storage.events_for_run(run_id)
+               if e["type"] == "cycle_contribution"]
+    assert json.loads(contrib[0]["payload_json"]) == {
+        "new_evidences": 2, "new_domains": 1}
+    per_cycle = outcome.stats["per_cycle"][1]
+    assert per_cycle["new_evidences"] == 2
+    assert per_cycle["new_domains"] == 1
+    # B6: source_fetched porta il flag reused (False: contenuto nuovo nel run)
+    fetched = [e for e in storage.events_for_run(run_id)
+               if e["type"] == "source_fetched"]
+    assert json.loads(fetched[0]["payload_json"])["reused"] is False
+    # B6: evidence_extracted per documento (count parziale, total cumulativo)
+    extracted = [json.loads(e["payload_json"]) for e in storage.events_for_run(run_id)
+                 if e["type"] == "evidence_extracted"]
+    assert extracted == [{"count": 2, "total": 2}]
+
     assert outcome.json_path and Path(outcome.json_path).exists()
     payload = json.loads(Path(outcome.json_path).read_text(encoding="utf-8"))
     assert payload["provenance"]["nodes"]

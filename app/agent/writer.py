@@ -92,7 +92,8 @@ class Writer:
 
     async def write(self, question: str, language: str,
                     subquestions: list[SubQuestion], evidences: list[Evidence],
-                    *, limit_note: str = "") -> DraftReport:
+                    *, limit_note: str = "",
+                    support_stats: dict | None = None) -> DraftReport:
         if not evidences:
             raise WriterError("cannot write a report with zero evidences")
         prompt_evidences = _trim_evidences(evidences)
@@ -137,6 +138,15 @@ class Writer:
         title = str(data.get("title", "")).strip() or question.strip()
         if limit_note:
             markdown += (f"\n\n> Nota: {limit_note}\n")
+        if support_stats:
+            # stati di verifica espliciti (dal verifier): riquadro dedicato.
+            # support_stats vuoto o None -> nessuna riga aggiunta.
+            markdown += (
+                "\n\n> Stati delle affermazioni: "
+                f"{support_stats.get('supported', 0)} supportate, "
+                f"{support_stats.get('contradicted', 0)} contraddette, "
+                f"{support_stats.get('insufficient', 0)} evidenze insufficienti, "
+                f"{support_stats.get('mixed', 0)} contrastate\n")
         return DraftReport(title=title, markdown=markdown, claims=claims)
 
     async def _ask(self, system_tpl: str, user: str) -> dict:

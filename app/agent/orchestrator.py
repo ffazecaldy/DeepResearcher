@@ -132,6 +132,7 @@ class Orchestrator:
         budget = RuntimeBudget(max_runtime_seconds=self.settings.max_runtime_seconds,
                                max_total_pages=self.settings.max_total_pages)
         seen_urls: set[str] = set()  # never re-pick pages already read
+        seen_content: set[str] = set()  # B6: content_hash gia' visti nel run
         effective = self.settings.cycle_budget(depth)
         log.debug(
             "[CYCLES] depth=%s | DR_MAX_CYCLES=%s | preset=%s | EFFETTIVO=%s "
@@ -185,6 +186,10 @@ class Orchestrator:
                                          + getattr(self.llm, "tokens_out", 0))
                 ctx.cycle_tokens_in = 0
                 ctx.cycle_tokens_out = 0
+                # B6: snapshot a inizio ciclo per il contributo del ciclo
+                ev_at_cycle_start = ctx.stats["evidences"]
+                domains_at_cycle_start = set(shared_state.domain_count)
+                contribution_done = False
 
                 # ---- planning (first cycle only) ----
                 if plan is None:
@@ -225,6 +230,9 @@ class Orchestrator:
 
                 # ---- search ----
                 _t_search = time.perf_counter()
+                # B6: sotto-domande aperte (dal gap report del ciclo precedente);
+                # vuote al ciclo 1 (non c'e' ancora nulla da riusare)
+                open_sqs: list[SubQuestion] = []
                 if cycle == 1:
                     queries = plan.queries[:self.settings.max_queries_per_cycle]
                 else:
@@ -319,9 +327,24 @@ class Orchestrator:
                     for doc in docs:
                         self._persist_source(run_id, doc)
                         if doc.fetch_status.value.startswith(("SUCCESS", "PARTIAL")):
+                            # B6/B12: contenuto gia' visto nel run (anche su URL
+                            # diverso) = duplicato: NON si rilegge e NON conta
+                            # come fonte indipendente (10 copie != 10 conferme)
+                            is_dup = (bool(doc.content_hash)
+                                      and doc.content_hash in seen_content)
+                            if doc.content_hash:
+                                seen_content.add(doc.content_hash)
+                            if is_dup:
+                                self.emit(ctx, "source_duplicate", cycle,
+                                          source_id=doc.source_id,
+                                          url=doc.final_url or doc.url,
+                                          content_hash=doc.content_hash)
+                                continue
                             ctx.stats["sources"] += 1
-                            self.emit(ctx, "source_fetched", cycle, source_id=doc.source_id,
-                                      url=doc.final_url or doc.url)
+                            self.emit(ctx, "source_fetched", cycle,
+                                      source_id=doc.source_id,
+                                      url=doc.final_url or doc.url,
+                                      reused=False)
                         else:
                             self.emit(ctx, "source_failed", cycle, source_id=doc.source_id,
                                       url=doc.url, error=doc.error)
@@ -338,16 +361,33 @@ class Orchestrator:
                     log.debug("[TEMPI] ciclo %s fetch+judge=%.1fs", cycle, t_fetch)
                     accepted_docs.extend(accepted)
                     _t_read = time.perf_counter()
-                    new_evs = await self._read_docs(ctx, question, cycle, accepted, subquestions)
+                    # B6: budget evidenze condiviso tra read e riuso nel ciclo
+                    cycle_budget_box = [_MAX_EVIDENCES_PER_CYCLE]
+                    new_evs = await self._read_docs(ctx, question, cycle, accepted,
+                                                    subquestions,
+                                                    shared_state=shared_state,
+                                                    budget_box=cycle_budget_box)
                     evidences.extend(new_evs)
-                    ctx.stats["evidences"] += len(new_evs)
+                    # B6: riuso — chunk gia' in storage per fonti lette nei
+                    # cicli precedenti, SOLO con l'angolo delle sotto-domande
+                    # ora aperte; nessun ri-download
+                    reused_evs = await self._reuse_chunks(
+                        ctx, question, cycle, open_sqs, shared_state,
+                        cycle_budget_box)
+                    evidences.extend(reused_evs)
                     ctx.timings.append({"cycle": cycle, "step": "read(LLM)",
                                           "s": round(time.perf_counter() - _t_read, 1)})
                     log.debug("[TEMPI] ciclo %s read=%.1fs", cycle,
                               time.perf_counter() - _t_read)
-                    self.emit(ctx, "evidence_extracted", cycle, count=len(new_evs),
-                              total=len(evidences))
                     self._maybe_emit_usage(ctx)
+                    # B6: contributo del ciclo — emesso SUBITO dopo la lettura
+                    # cosi' arriva nel DB anche se la deadline interrompe qui
+                    self._record_cycle_contribution(
+                        ctx, cycle, ev_at_cycle_start, domains_at_cycle_start,
+                        {m.get("domain", "") for m in
+                         shared_state.read_sources.values()
+                         if m.get("cycle") == cycle})
+                    contribution_done = True
                     # B5: check deadline per-ciclo (subito dopo il primo step pesante)
                     if cycle_deadline[0] and time.monotonic() > cycle_deadline[0]:
                         limit_note = (limit_note or
@@ -375,6 +415,13 @@ class Orchestrator:
                         self.emit(ctx, "cycle_completed", cycle, complete=True,
                                   stop_reason=stop_reason, stop_detail=stop_detail)
                         break
+
+                # B6: ciclo senza nuovi documenti — contributo a zero (il evento
+                # deve esistere nel DB per ogni ciclo con search conclusa)
+                if not contribution_done:
+                    self._record_cycle_contribution(
+                        ctx, cycle, ev_at_cycle_start, domains_at_cycle_start,
+                        set())
 
                 # ---- gap check (coverage decided in code) ----
                 _t_gap = time.perf_counter()
@@ -478,9 +525,21 @@ class Orchestrator:
                     self.storage._exec(
                         "UPDATE claims SET final_citation_no=? WHERE id=?",
                         (c.final_citation_no, c.claim_id))
+                # B12: stati di verifica (supportata/contraddetta/insufficiente/
+                # contrastante) dai prefissi [support:X] scritti dal verifier —
+                # resi visibili nel report, mai nascosti
+                support_stats = _count_support(verified.claims)
+                verified_body = verified.markdown
+                if support_stats and any(support_stats.values()):
+                    verified_body += (
+                        "\n\n> Stati delle affermazioni: "
+                        f"{support_stats['supported']} supportate, "
+                        f"{support_stats['contradicted']} contraddette, "
+                        f"{support_stats['insufficient']} evidenze insufficienti, "
+                        f"{support_stats['mixed']} contrastate\n")
                 # P0-1: the FINAL text is the verified one — persisted, exported,
                 # streamed. Draft corrections can no longer be thrown away.
-                report_md = _final_markdown(draft.title, verified.markdown,
+                report_md = _final_markdown(draft.title, verified_body,
                                             verified.claims, evidences, src_map)
                 report_claims = verified.claims
                 self.emit(ctx, "report_final", 0, title=draft.title,
@@ -546,6 +605,12 @@ class Orchestrator:
         for cyc, agg in sorted(by_cycle.items()):
             agg["steps"] = sum(1 for r in ctx.timings if r["cycle"] == cyc)
         stats["per_cycle"] = by_cycle
+        # B6: contributo per ciclo (nuove evidenze / nuovi domini) — registrato
+        # live durante il run, qui merged negli aggregati persistiti
+        for cyc, contribution in ctx.stats.get("per_cycle", {}).items():
+            agg = by_cycle.setdefault(cyc, {"seconds": 0.0})
+            agg["new_evidences"] = contribution.get("new_evidences", 0)
+            agg["new_domains"] = contribution.get("new_domains", 0)
         # usage counters (llm client counters are process-cumulative: exact in CLI,
         # approximate for a long-lived server sharing one client across runs)
         self.storage.usage_inc(
@@ -586,7 +651,8 @@ class Orchestrator:
         self.storage.add_source(
             doc.source_id, run_id, doc.url, doc.final_url, doc.domain, doc.title,
             doc.http_status, doc.content_type, doc.fetch_status.value,
-            doc.published_at, doc.author, doc.redirects, doc.error, doc.byte_len)
+            doc.published_at, doc.author, doc.redirects, doc.error, doc.byte_len,
+            content_hash=getattr(doc, "content_hash", ""))
 
     async def _evaluate_docs(self, run_id, cycle, docs, question, decisions, ctx):
         """Typed decisions per document: is_relevant + source_type + quality."""
@@ -634,7 +700,9 @@ class Orchestrator:
             accepted.append(doc)
         return accepted
 
-    async def _read_docs(self, ctx, question, cycle, accepted_docs, subquestions):
+    async def _read_docs(self, ctx, question, cycle, accepted_docs, subquestions,
+                         shared_state: SearchState | None = None,
+                         budget_box: list[int] | None = None):
         """P1-6: relevance-oriented reading.
 
         - chunk selection: keyword overlap with the OPEN subquestions picks
@@ -645,12 +713,17 @@ class Orchestrator:
           from different docs.
         - budget: per-source share = ceil(remaining / remaining docs), so early
           docs cannot eat the whole cycle budget.
+        - B6: contatori LIVE — ctx.stats["evidences"] cresce a ogni chunk e
+          evidence_extracted esce per SINGOLO documento (count parziale del
+          doc, total cumulativo del run), non una sola volta a fine ciclo.
+        - B6: ogni doc letto viene registrato in shared_state.read_sources con
+          le sotto-domande usate, cosi' i cicli successivi possono riusare i
+          chunk da storage senza ri-leggere la fonte.
         """
-        evidences = []
-        total_budget = _MAX_EVIDENCES_PER_CYCLE
+        evidences: list = []
         per_source_cap = max(1, self.settings.reader_chunks_per_source)
         remaining_docs = len(accepted_docs)
-        budget = total_budget
+        budget = budget_box if budget_box is not None else [_MAX_EVIDENCES_PER_CYCLE]
 
         def _kw(text: str) -> set[str]:
             stop = {"della", "dello", "delle", "degli", "nella", "nel", "per",
@@ -688,29 +761,118 @@ class Orchestrator:
             return picked
 
         for doc in accepted_docs:
-            if budget <= 0:
+            if budget[0] <= 0:
                 break
-            share = max(1, -(-budget // max(1, remaining_docs)))  # ceil division
+            share = max(1, -(-budget[0] // max(1, remaining_docs)))  # ceil division
             chunks = _pick_chunks(doc)[:max(1, min(per_source_cap, share))]
             remaining_docs -= 1
+            doc_ev = 0          # evidenze di QUESTO documento (count parziale)
+            used_sqs: set[str] = set()
             for ch in chunks:
-                if budget <= 0:
+                if budget[0] <= 0:
                     break
                 sq = _best_sq(ch) if sq_tokens else (
                     subquestions[0] if subquestions else None)
                 self.emit(ctx, "source_reading", cycle, url=doc.final_url or doc.url,
-                          subquestion=sq.text if sq else "")
+                          subquestion=sq.text if sq else "", reused=False)
                 found = await self.reader.extract_evidences(
                     question, sq.text if sq else "", ch,
-                    max_evidences=min(4, budget),
+                    max_evidences=min(4, budget[0]),
                     subquestion_id=sq.subquestion_id if sq else None)
                 self.storage.add_chunk(ch)
+                if sq is not None:
+                    used_sqs.add(sq.subquestion_id)
                 for e in found:
                     e.run_id = ctx.run_id
                     self.storage.add_evidence(e)
                     evidences.append(e)
-                    budget -= 1
+                    doc_ev += 1
+                    budget[0] -= 1
+                # B6 live: il contatore cresce DURANTE la lettura, non a fine ciclo
+                ctx.stats["evidences"] += len(found)
+                self._maybe_emit_usage(ctx)
+            # B6 live: evento per SINGOLO documento (count parziale, total cumulativo)
+            self.emit(ctx, "evidence_extracted", cycle, count=doc_ev,
+                      total=ctx.stats["evidences"])
+            # B6: registra la fonte come gia' letta (per il riuso nei cicli dopo)
+            if shared_state is not None:
+                shared_state.read_sources[doc.source_id] = {
+                    "url": doc.url, "final_url": doc.final_url or doc.url,
+                    "title": doc.title, "domain": doc.domain, "cycle": cycle}
+                if used_sqs:
+                    (shared_state.used_sq_by_source.setdefault(doc.source_id, set())
+                     .update(used_sqs))
         return evidences
+
+    async def _reuse_chunks(self, ctx, question, cycle, open_sqs,
+                            shared_state: SearchState,
+                            budget_box: list[int]) -> list:
+        """B6: riuso — nuove evidenze da chunk GIA' in storage per fonti lette
+        in cicli precedenti, usando SOLO la sotto-domanda ora aperta come angolo.
+
+        Zero re-download: il chunk arriva da storage.chunks_for_source (non si
+        ri-scarica la pagina, non si ri-chunkifica il testo gia' letto); il
+        reader viene chiamato solo per l'estrazione mirata col nuovo angolo.
+        Lo stesso angolo non gira due volte sulla stessa fonte.
+        """
+        out: list = []
+        if not open_sqs or budget_box[0] <= 0:
+            return out
+        for source_id, meta in list(shared_state.read_sources.items()):
+            if budget_box[0] <= 0:
+                break
+            if meta.get("cycle", cycle) >= cycle:
+                continue  # letta in QUESTO ciclo: gia' passata da _read_docs
+            used = shared_state.used_sq_by_source.setdefault(source_id, set())
+            pending = [sq for sq in open_sqs if sq.subquestion_id not in used]
+            if not pending:
+                continue
+            rows = self.storage.chunks_for_source(source_id)
+            if not rows:
+                continue
+            # l'angolo e' ora "consumato" per questa fonte, anche se il reader
+            # non trovera' nulla: niente ri-estrazioni identiche al prossimo ciclo
+            used.update(sq.subquestion_id for sq in pending)
+            for sq in pending:
+                for row in rows:
+                    if budget_box[0] <= 0:
+                        return out
+                    ch = Chunk(source_id=source_id, chunk_id=row["id"],
+                               idx=row["idx"], text=row["text"],
+                               char_start=row["char_start"],
+                               char_end=row["char_end"])
+                    self.emit(ctx, "source_reading", cycle,
+                              url=meta.get("final_url") or meta.get("url", ""),
+                              subquestion=sq.text, reused=True)
+                    found = await self.reader.extract_evidences(
+                        question, sq.text, ch,
+                        max_evidences=min(4, budget_box[0]),
+                        subquestion_id=sq.subquestion_id)
+                    for e in found:
+                        e.run_id = ctx.run_id
+                        self.storage.add_evidence(e)
+                        out.append(e)
+                        budget_box[0] -= 1
+                    # B6 live: stessi contatori incrementali del read normale
+                    ctx.stats["evidences"] += len(found)
+                    self.emit(ctx, "evidence_extracted", cycle, count=len(found),
+                              total=ctx.stats["evidences"], reused=True)
+                    self._maybe_emit_usage(ctx)
+        return out
+
+    def _record_cycle_contribution(self, ctx, cycle: int, ev_start: int,
+                                   domains_before: set[str],
+                                   domains_now: set[str]) -> dict:
+        """B6: contributo del ciclo in ctx.stats["per_cycle"] + evento
+        cycle_contribution (la UI lo ignorera' per ora; serve nel DB/events)."""
+        entry = {
+            "new_evidences": max(0, ctx.stats["evidences"] - ev_start),
+            "new_domains": len({d for d in domains_now
+                                if d and d not in domains_before}),
+        }
+        ctx.stats.setdefault("per_cycle", {})[cycle] = entry
+        self.emit(ctx, "cycle_contribution", cycle, **entry)
+        return entry
 
     def _maybe_emit_usage(self, ctx) -> None:
         """Throttled usage_update so the UI shows live counters."""
@@ -744,6 +906,20 @@ class Orchestrator:
 
 
 # ---------- module helpers ----------
+_SUPPORT_RE = re.compile(r"\[support:(supported|contradicted|insufficient|mixed)\]")
+
+
+def _count_support(claims) -> dict[str, int]:
+    """Count the [support:X] prefixes written by the verifier (B12).
+    Claims without the prefix are not counted (older runs / non-LLM paths)."""
+    out = {"supported": 0, "contradicted": 0, "insufficient": 0, "mixed": 0}
+    for c in claims:
+        m = _SUPPORT_RE.search(getattr(c, "verdict_reason", "") or "")
+        if m:
+            out[m.group(1)] += 1
+    return out
+
+
 def _as_query(run_id: str, subquestion_id: str, text: str, cycle: int, idx: int):
     from app.models import GeneratedQuery
     return GeneratedQuery(query_id=f"{run_id[:24]}_qc{cycle}_{idx}",

@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS sources(
   id TEXT PRIMARY KEY, run_id TEXT NOT NULL, url TEXT, url_final TEXT, domain TEXT,
   title TEXT, http_status INTEGER, content_type TEXT, fetch_status TEXT,
   published_at TEXT, author TEXT, redirects_json TEXT, error TEXT, byte_len INTEGER,
-  source_type TEXT, quality_score INTEGER, relevance REAL, accepted INTEGER DEFAULT 0
+  content_hash TEXT DEFAULT '', source_type TEXT, quality_score INTEGER,
+  relevance REAL, accepted INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS chunks(
   id TEXT PRIMARY KEY, source_id TEXT NOT NULL, idx INTEGER, text TEXT,
@@ -97,6 +98,10 @@ class Storage:
         if "final_citation_no" not in cols:
             self._conn.execute(
                 "ALTER TABLE claims ADD COLUMN final_citation_no INTEGER")
+        src_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(sources)")}
+        if "content_hash" not in src_cols:
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN content_hash TEXT DEFAULT ''")
         # future migrations go here, each guarded by a PRAGMA table_info check
 
     def close(self) -> None:
@@ -184,14 +189,28 @@ class Storage:
     def add_source(self, source_id: str, run_id: str, url: str, url_final: str,
                    domain: str, title: str, http_status: int | None, content_type: str,
                    fetch_status: str, published_at: str | None, author: str | None,
-                   redirects: list[str], error: str | None, byte_len: int) -> None:
+                   redirects: list[str], error: str | None, byte_len: int,
+                   content_hash: str = "") -> None:
         self._exec(
             "INSERT INTO sources(id, run_id, url, url_final, domain, title, http_status,"
-            " content_type, fetch_status, published_at, author, redirects_json, error, byte_len)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " content_type, fetch_status, published_at, author, redirects_json, error,"
+            " byte_len, content_hash)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (source_id, run_id, url, url_final, domain, title, http_status, content_type,
-             fetch_status, published_at, author, json.dumps(redirects), error, byte_len),
+             fetch_status, published_at, author, json.dumps(redirects), error, byte_len,
+             content_hash),
         )
+
+    def content_hash_seen(self, run_id: str, content_hash: str) -> bool:
+        """True se questo run ha gia' una fonte con lo stesso content_hash
+        (stesso testo su URL diverso = non fonte indipendente)."""
+        if not content_hash:
+            return False
+        rows = self._query(
+            "SELECT 1 FROM sources WHERE run_id=? AND content_hash=? LIMIT 1",
+            (run_id, content_hash),
+        )
+        return bool(rows)
 
     def update_source_evaluation(self, source_id: str, source_type: str | None,
                                  quality_score: int | None, relevance: float | None,
