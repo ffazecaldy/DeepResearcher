@@ -79,6 +79,7 @@ function openStream(runId) {
     "run_completed", "run_failed", "run_cancelled", "run_closed",
     // eventi nuovi lato backend
     "source_queued", "source_fetching", "source_reading", "usage_update",
+    "source_duplicate", "source_reused", "cycle_contribution",
   ];
   types.forEach((t) => es.addEventListener(t, (e) => {
     try { handleEvent(JSON.parse(e.data)); } catch (err) { console.error(err); }
@@ -166,7 +167,11 @@ function eventSentence(type, p = {}) {
     case "search_result_found": return `Trovati ${p.count} risultati`;
     case "source_queued":      return `In coda: ${shortUrl(p.url)}`;
     case "source_fetching":    return `Scarico pagina ${shortUrl(p.url)}`;
-    case "source_fetched":     return `Letta pagina ${shortUrl(p.url)}`;
+    case "source_fetched":     return p.reused
+      ? `Riutilizzata pagina già nota ${shortUrl(p.url)}`
+      : `Letta pagina ${shortUrl(p.url)}`;
+    case "source_duplicate":   return `Duplicato scartato: ${shortUrl(p.url)} (stesso contenuto di ${shortUrl(p.duplicate_of || "altra fonte")})`;
+    case "cycle_contribution": return `Ciclo ${p.cycle ?? ""}: +${p.new_evidences ?? 0} evidenze, +${p.new_domains ?? 0} domini nuovi`;
     case "source_reading":     return p.subquestion ? `Sto leggendo ${shortUrl(p.url)} per: ${p.subquestion}` : `Sto leggendo ${shortUrl(p.url)}`;
     case "source_failed":      return `Errore nel leggere ${shortUrl(p.url)} (${p.error || "errore"})`;
     case "source_evaluated":   return `Valutata fonte ${shortUrl(p.url || p.source_id)} (tipo ${p.source_type || "?"}, qualità ${p.quality ?? "?"})`;
@@ -259,7 +264,9 @@ const ACTION_ACTIVE = {
 /* tipi che COMPLETANO un'azione (ultima azione in grigio) */
 const ACTION_DONE = {
   search_result_found: (p) => `trovati ${p.count} risultati`,
-  source_fetched: (p) => `letta ${shortUrl(p.url)}`,
+  source_fetched: (p) => p.reused ? `riusata ${shortUrl(p.url)}` : `letta ${shortUrl(p.url)}`,
+  source_duplicate: (p) => `duplicato: ${shortUrl(p.url)}`,
+  cycle_contribution: (p) => `+${p.new_evidences || 0} evidenze, +${p.new_domains || 0} domini`,
   source_failed: (p) => `errore lettura ${shortUrl(p.url)}`,
   source_rejected: (p) => `scartata fonte ${shortUrl(p.source_id || p.url)}`,
   evidence_extracted: (p) => `estratte ${p.count} evidenze (tot ${p.total})`,
