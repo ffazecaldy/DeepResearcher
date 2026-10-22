@@ -245,6 +245,11 @@ class Orchestrator:
                             shared_state.attempts_by_sq.get(s.subquestion_id, 0) + 1
                     gen_queries = await self.query_generator.generate(
                         question, open_sqs, shared_state, cycle)
+                    # B13: gli ID generati dal QueryGenerator (es. "g2_1") sono
+                    # unici solo dentro il run: senza prefisso collidono tra run
+                    # diversi sulla PK globale di queries
+                    for i, gq in enumerate(gen_queries):
+                        gq.query_id = f"{run_id[:24]}_g{cycle}_{i}"
                     all_q = (gen_queries
                              + [_as_query(ctx.run_id, q.subquestion_id, q.text,
                                           cycle, i)
@@ -268,6 +273,14 @@ class Orchestrator:
                             self.settings.search_provider.value)
                 log.debug("[CICLO %s/%s] query: %s", cycle, effective,
                           [q.text for q in queries])
+                # B13 difesa attiva: ID duplicati non devono MAI raggiungere la
+                # PK di queries (collisione = run fallito); rigenera i collidenti
+                seen_ids = set()
+                for q in queries:
+                    if q.query_id in seen_ids or not q.query_id:
+                        q.query_id = (f"{run_id[:24]}_x{cycle}_"
+                                      f"{len(seen_ids)}_{abs(hash(q.text)) % 10_000}")
+                    seen_ids.add(q.query_id)
                 # P1-8: snowball URLs (http… nel testo della query) sono
                 # fetchati DIRETTAMENTE con le stesse protezioni/budget del
                 # fetch ordinario — non passano dal motore di ricerca
