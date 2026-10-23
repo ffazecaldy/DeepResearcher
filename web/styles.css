@@ -419,3 +419,204 @@ html[data-theme="light"] button.citation:hover{color:#fffaf0}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);max-width:80vw;
   background:var(--panel);border:1px solid var(--amber-dk);border-radius:5px;
   padding:8px 13px;font-family:var(--mono);font-size:11px;color:var(--txt);z-index:100}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   UX 2.0 — run header, dettagli tecnici, viste report, lettura, stampa
+   ══════════════════════════════════════════════════════════════════════════ */
+/* l'attributo hidden deve SEMPRE vincere sui display degli autori
+   (.panel{display:flex} / .btn{display:inline-flex} lo sovrascrivvano) */
+[hidden]{display:none !important}
+
+/* variabile di avviso: era usata ma mai definita (i colori cadevano su unset) */
+:root, html[data-theme="dark"]{--warn:#e8b33d}
+html[data-theme="light"]{--warn:#a8721a}
+
+/* ── badge come bottone (stato nella statusbar, cliccabile solo con avvisi) ─ */
+button.badge{appearance:none;background:transparent;cursor:default;color:inherit}
+button.badge.clickable{cursor:pointer}
+button.badge.clickable:hover{background:var(--amber-soft);border-color:var(--warn)}
+
+/* ── dettagli tecnici richiudibili ──────────────────────────────────────── */
+.tech-details{flex:none;background:var(--panel);border:1px solid var(--line);
+  border-radius:5px;font-family:var(--mono);font-size:10px;color:var(--dim)}
+.tech-details summary{list-style:none;cursor:pointer;user-select:none;
+  display:flex;align-items:center;gap:6px;padding:4px 10px;font-size:9px;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.tech-details summary::-webkit-details-marker{display:none}
+.tech-details summary::before{content:"▸";font-size:9px;color:var(--faint);
+  transition:transform .12s}
+.tech-details[open] summary::before{transform:rotate(90deg)}
+.tech-details summary:hover{color:var(--dim)}
+.td-row{display:flex;flex-wrap:wrap;gap:4px 16px;padding:2px 10px 7px}
+.tdi{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.tdi b{color:var(--txt);font-weight:500}
+
+/* ── run header ─────────────────────────────────────────────────────────── */
+.run-header{flex:none;background:var(--panel);border:1px solid var(--line);
+  border-radius:5px;padding:7px 10px;display:flex;flex-direction:column;gap:5px}
+.rh-top{display:flex;align-items:flex-start;gap:8px}
+.rh-q{flex:1 1 auto;min-width:0;font-size:14.5px;font-weight:600;letter-spacing:-.01em;
+  line-height:1.35;word-break:break-word}
+.rh-meta{display:flex;flex-wrap:wrap;align-items:center;gap:5px 12px;
+  font-size:10px;color:var(--dim)}
+.rh-m{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.rh-m.warn{color:var(--warn)}
+.rh-meta .badge{font-size:9px}
+
+/* ── bottone header "wide" (con testo: coerenza, ripeti ricerca) ────────── */
+.hbtn.wide{width:auto;padding:0 7px;gap:4px;font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.05em}
+.hbtn.on{color:var(--amber);border-color:var(--amber-dk)}
+
+/* ── pannello attività collassabile ─────────────────────────────────────── */
+#activity-panel.collapsed{flex:0 0 auto}
+#activity-panel.collapsed .plan,#activity-panel.collapsed .activity{display:none}
+#activity-head{cursor:pointer}
+#activity-head:hover{background:var(--hover)}
+
+/* ── tab Report / Fonti / Verifiche ─────────────────────────────────────── */
+.rtabs{display:flex;gap:2px;margin-left:6px}
+.rtab{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;
+  border:1px solid transparent;background:transparent;color:var(--faint);
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;
+  border-radius:4px;cursor:pointer;white-space:nowrap}
+.rtab:hover{color:var(--txt)}
+.rtab.active{color:var(--amber);border-color:var(--line3);background:var(--panel3)}
+.rtab-n{color:var(--faint);font-size:9px}
+.rview{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
+.rview-bar{flex:none;display:flex;align-items:center;gap:10px;padding:6px 10px;
+  border-bottom:1px solid var(--line2)}
+.src-counters{font-size:10px;color:var(--dim)}
+.src-counters b{color:var(--txt);font-weight:500}
+.rsearch-wrap{display:inline-flex;align-items:center;gap:4px}
+#report-search,#src-filter{height:19px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:4px;color:var(--txt);
+  font-family:var(--mono);font-size:10px;padding:0 6px;outline:none}
+#report-search{width:110px}
+#src-filter{width:150px;margin-left:auto}
+#report-search:focus,#src-filter:focus{border-color:var(--amber-dk)}
+#report-search::placeholder,#src-filter::placeholder{color:var(--faint)}
+#report-search-n{font-size:9px}
+
+/* ── vista fonti ────────────────────────────────────────────────────────── */
+.src-list{list-style:none;margin:0;padding:6px;overflow-y:auto;flex:1;min-height:0;
+  font-size:12.5px}
+.src-list li{padding:6px 8px;border:1px solid var(--line2);border-radius:4px;
+  margin-bottom:5px}
+.src-line{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.src-line a{color:var(--amber);text-decoration:none;word-break:break-all}
+.src-line a:hover{text-decoration:underline}
+.src-meta{display:flex;flex-wrap:wrap;gap:3px 10px;margin-top:3px;
+  font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.src-cites{color:var(--amber)}
+
+/* ── vista verifiche ────────────────────────────────────────────────────── */
+.verif-legend{flex:none;padding:6px 10px;border-bottom:1px solid var(--line2);
+  font-size:9.5px;line-height:1.5;color:var(--dim)}
+.verif-list{list-style:none;margin:0;padding:6px;overflow-y:auto;flex:1;min-height:0}
+.verif-list li{padding:7px 8px;border:1px solid var(--line2);border-radius:4px;
+  margin-bottom:5px}
+.verif-head{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.verif-text{margin-top:4px;font-size:13px;line-height:1.5}
+.verif-foot{margin-top:5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sup{font-family:var(--mono);font-size:9px;letter-spacing:.05em;padding:1px 6px;
+  border-radius:3px;border:1px solid var(--line3);color:var(--dim)}
+.sup-supported{color:var(--gain);border-color:var(--gain)}
+.sup-contradicted{color:var(--loss);border-color:var(--loss)}
+.sup-insufficient{color:var(--warn);border-color:var(--warn)}
+.sup-mixed{color:var(--amber);border-color:var(--amber-dk)}
+
+/* ── pannello avvisi (riuso stile coerenza) ─────────────────────────────── */
+#warnings-panel .w-sec{font-family:var(--mono);font-size:9px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--faint);margin:8px 0 2px}
+#warnings-panel .coherence-head .hbtn{margin-left:auto}
+
+/* ── indice del report ──────────────────────────────────────────────────── */
+.report-toc{flex:none;margin:8px 10px 0;padding:7px 10px;border:1px solid var(--line2);
+  border-radius:4px;background:var(--panel2)}
+.toc-ttl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--faint);margin-bottom:4px}
+.report-toc ul{list-style:none;margin:0;padding:0}
+.report-toc li{line-height:1.55}
+.report-toc li.toc-h3{padding-left:12px}
+.report-toc li.toc-h4{padding-left:24px}
+.report-toc a{color:var(--dim);text-decoration:none;font-size:12px}
+.report-toc a:hover{color:var(--amber)}
+
+/* ── leggibilità report: sans 15.5px, 80ch, tabelle scrollabili ─────────── */
+.report{font-size:15.5px;line-height:1.6;max-width:80ch}
+.report p{margin:7px 0}
+.report h1{font-size:21px;margin:14px 0 8px;letter-spacing:-.01em}
+.report h2{font-size:17.5px;margin:18px 0 8px;padding-bottom:4px;
+  border-bottom:1px solid var(--line2)}
+.report h3{font-size:15.5px;margin:14px 0 5px;color:var(--txt)}
+.report h1,.report h2,.report h3{font-weight:600}
+.report .li{margin:4px 0 4px 16px}
+.table-wrap{overflow-x:auto;margin:8px 0;border:1px solid var(--line2);border-radius:4px}
+.report table{border-collapse:collapse;font-size:13.5px;min-width:100%}
+.report th,.report td{border:1px solid var(--line2);padding:4px 8px;text-align:left;
+  vertical-align:top}
+.report th{background:var(--panel2);font-family:var(--mono);font-size:11px;
+  text-transform:uppercase;letter-spacing:.04em;color:var(--dim)}
+mark{background:var(--amber-soft);color:inherit;border-radius:2px;padding:0 1px;
+  box-shadow:inset 0 -1px 0 var(--amber-dk)}
+
+/* ── citazione selezionata ──────────────────────────────────────────────── */
+button.citation.citation-sel{background:var(--amber);color:#171207;border-color:var(--amber)}
+html[data-theme="light"] button.citation.citation-sel{color:#fffaf0}
+button.citation:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+
+/* ── modalità lettura ───────────────────────────────────────────────────── */
+body.reading .col-left,body.reading .col-right,body.reading #tech-details{display:none}
+
+/* ── responsive: <=1280 la destra va sotto (griglia a 2) ────────────────── */
+@media (max-width:1280px){
+  .work{display:grid;grid-template-columns:minmax(200px,var(--w-left,280px)) minmax(0,1fr);
+    grid-template-rows:minmax(0,1fr) auto;height:calc(100vh - 45px)}
+  .col-left{grid-column:1;grid-row:1 / span 2}
+  .col-center{grid-column:2;grid-row:1;width:auto !important;flex:1 1 auto}
+  .col-center.c-w{width:auto !important}
+  .col-right{grid-column:2;grid-row:2;width:100% !important;height:auto;
+    max-height:36vh;overflow-y:auto}
+  .resizers{display:none}
+  body.reading .work{grid-template-columns:minmax(0,1fr)}
+  body.reading .col-center{grid-column:1;grid-row:1}
+}
+/* ── responsive: <=900 una colonna, aside impilate ──────────────────────── */
+@media (max-width:900px){
+  .work{display:flex;flex-direction:column;height:auto;overflow:visible}
+  .col-left,.col-right{width:100%;height:auto;max-height:none;overflow:visible}
+  .col-center{width:100% !important;flex:none;overflow:visible;height:auto}
+  .resizers{display:none}
+  #activity-panel{min-height:180px;max-height:60vh}
+  #report-panel{min-height:320px}
+  #report{max-height:70vh}
+  .rsearch-wrap{display:none}
+  body.reading .col-left,body.reading .col-right{display:none}
+}
+
+/* ── movimento ridotto: niente spinner/pulse ────────────────────────────── */
+@media (prefers-reduced-motion:reduce){
+  *{transition:none !important;animation:none !important}
+}
+
+/* ── stampa: solo il report ─────────────────────────────────────────────── */
+@media print{
+  @page{margin:14mm}
+  body{background:#fff;color:#000}
+  .topbar,.col-left,.col-right,.statusbar,.tech-details,#run-header,.action-banner,
+  .stepper,#activity-panel,.server-banner,.toast,.sprite{display:none !important}
+  .work{display:block;height:auto;overflow:visible}
+  .col-center{overflow:visible;width:100% !important;height:auto}
+  #report-panel{border:none;background:#fff;overflow:visible}
+  #report-panel .ph{display:none !important}
+  #verify-stats,#coherence-panel,#warnings-panel{display:none !important}
+  #view-sources,#view-verifs{display:none !important}
+  #view-report{display:block !important}
+  .report-toc{display:none !important}
+  #report{overflow:visible;max-width:none;max-height:none;font-size:12pt;color:#000}
+  .report a{color:#000;text-decoration:underline}
+  .report h2{border-bottom-color:#999}
+  button.citation{border:1px solid #999;color:#000;background:none}
+  mark{background:#ffe28a;color:#000}
+}

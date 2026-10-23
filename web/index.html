@@ -38,6 +38,9 @@
   <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></symbol>
   <symbol id="i-loader" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></symbol>
   <symbol id="i-max" viewBox="0 0 24 24"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-printer" viewBox="0 0 24 24"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></symbol>
 </svg>
 
 <header class="topbar">
@@ -47,7 +50,7 @@
     <span class="brand-sub">research agent verificabile</span>
   </div>
   <div class="tbright">
-    <span class="pill"><span id="pill-dot" class="dot idle"></span><span id="pill-state">idle</span></span>
+    <span class="pill"><span id="pill-dot" class="dot idle"></span><span id="pill-state">in attesa</span></span>
     <button id="theme-toggle" class="btn ico ghost" aria-label="Cambia tema" title="Tema scuro / chiaro">
       <svg class="ic s16 ic-moon"><use href="#i-moon"/></svg>
       <svg class="ic s16 ic-sun"><use href="#i-sun"/></svg>
@@ -74,9 +77,9 @@
           <div class="fld">
             <label for="depth">Profondita</label>
             <select id="depth">
-              <option value="rapida">Rapida (1 ciclo)</option>
-              <option value="standard" selected>Standard (3 cicli)</option>
-              <option value="approfondita">Approfondita (8 cicli)</option>
+              <option value="rapida">Rapida — 1 ciclo, panoramica veloce</option>
+              <option value="standard" selected>Standard — 3 cicli, buon equilibrio</option>
+              <option value="approfondita">Approfondita — 8 cicli, max copertura</option>
             </select>
           </div>
           <div class="fld">
@@ -92,8 +95,9 @@
         <div class="row2">
           <button id="start-btn" type="submit" class="btn pri">
             <svg class="ic s12"><use href="#i-play"/></svg>Avvia</button>
-          <button id="stop-btn" type="button" class="btn danger" hidden>
-            <svg class="ic s12"><use href="#i-stop"/></svg>Interrompi</button>
+          <button id="stop-btn" type="button" class="btn danger" hidden
+                  aria-label="Interrompi la ricerca in corso" title="Interrompi la ricerca in corso">
+            <svg class="ic s12" aria-hidden="true"><use href="#i-stop"/></svg>Interrompi</button>
         </div>
       </div>
     </form>
@@ -120,22 +124,48 @@
 
   <!-- ============ CENTRO: banner azione + statusbar + attivita + report ============ -->
   <section class="col col-center" aria-label="Avanzamento e report">
-    <div id="statusbar" class="statusbar" role="status">
-      <span class="sbi"><span id="sb-state" class="badge idle">idle</span></span>
-      <span class="sbi" title="Tempo trascorso"><svg class="ic s12"><use href="#i-clock"/></svg><b id="sb-time" class="num">0:00</b></span>
-      <span class="sbi">ciclo <b id="sb-cycle" class="num">-</b></span>
-      <span class="sbi">query <b id="sb-queries" class="num">0</b></span>
-      <span class="sbi">fonti <b id="sb-sources" class="num">0</b></span>
-      <span class="sbi">evidenze <b id="sb-evidence" class="num">0</b></span>
-      <span class="sbi">claims <b id="sb-claims" class="num">0</b></span>
-      <span class="sbi" title="Token in ingresso + in uscita">token <b id="sb-tokens" class="num">0</b></span>
-      <span class="sbi" title="Chiamate LLM"><svg class="ic s12"><use href="#i-cpu"/></svg><b id="sb-llm" class="num">0</b></span>
-      <span class="sbi sbi-grow">engine <b id="sb-engine">...</b></span>
+    <div id="statusbar" class="statusbar" role="status" aria-live="polite">
+      <span class="sbi"><button id="sb-state" class="badge idle" type="button" disabled>in attesa</button></span>
+      <span class="sbi" title="Durata della ricerca"><svg class="ic s12" aria-hidden="true"><use href="#i-clock"/></svg><b id="sb-time" class="num">—</b></span>
+      <span class="sbi" title="Ciclo di ricerca corrente">ciclo <b id="sb-cycle" class="num">-</b></span>
+      <span class="sbi" title="Query di ricerca pianificate">query <b id="sb-queries" class="num">0</b></span>
+      <span class="sbi" title="Fonti lette e accettate">fonti <b id="sb-sources" class="num">0</b></span>
+      <span class="sbi" title="Evidenze estratte dalle fonti">evidenze <b id="sb-evidence" class="num">0</b></span>
+      <span class="sbi" title="Affermazioni del report verificate">claims <b id="sb-claims" class="num">0</b></span>
+      <span class="sbi sbi-grow"></span>
       <span class="sbi resizers">
         <button type="button" class="rbtn" data-col="left" title="Allarga/restringi colonna sinistra" aria-label="Ridimensiona colonna sinistra"><svg class="ic s12"><use href="#i-max"/></svg></button>
         <button type="button" class="rbtn" data-col="center" title="Allarga/restringi area centrale" aria-label="Ridimensiona area centrale"><svg class="ic s12"><use href="#i-max"/></svg></button>
         <button type="button" class="rbtn" data-col="right" title="Allarga/restringi colonna destra" aria-label="Ridimensiona colonna destra"><svg class="ic s12"><use href="#i-max"/></svg></button>
       </span>
+    </div>
+
+    <!-- token / chiamate LLM / engine: fuori dalla statusbar, richiudibili -->
+    <details id="tech-details" class="tech-details">
+      <summary title="Token, chiamate LLM e motore di decisione">Dettagli tecnici</summary>
+      <div class="td-row">
+        <span class="tdi" title="Token LLM in ingresso + in uscita">token <b id="sb-tokens" class="num">0</b></span>
+        <span class="tdi" title="Chiamate LLM"><svg class="ic s12" aria-hidden="true"><use href="#i-cpu"/></svg><b id="sb-llm" class="num">0</b></span>
+        <span class="tdi" title="Motore di decisione">engine <b id="sb-engine">...</b></span>
+      </div>
+    </details>
+
+    <!-- run header: domanda, stato, data, durata, ragione di arresto, ripeti -->
+    <div id="run-header" class="run-header" hidden>
+      <div class="rh-top">
+        <span id="rh-question" class="rh-q"></span>
+        <button id="repeat-btn" class="hbtn wide" type="button" hidden
+                title="Ripeti questa ricerca: precompila domanda e opzioni nel modulo"
+                aria-label="Ripeti questa ricerca">
+          <svg class="ic s12" aria-hidden="true"><use href="#i-play"/></svg>ripeti ricerca
+        </button>
+      </div>
+      <div class="rh-meta mono">
+        <span id="rh-status" class="badge idle">in attesa</span>
+        <span class="rh-m" title="Data e ora di avvio"><svg class="ic s12" aria-hidden="true"><use href="#i-clock"/></svg><span id="rh-date">—</span></span>
+        <span class="rh-m" title="Durata della ricerca">durata <span id="rh-duration">—</span></span>
+        <span id="rh-stop" class="rh-m warn" hidden title="Ragione dell'arresto"></span>
+      </div>
     </div>
 
     <div id="action-banner" class="action-banner idle" role="status" aria-live="polite">
@@ -154,8 +184,9 @@
       <li data-phase="verifica" class="step"><span class="sdot"></span>verifica</li>
     </ol>
 
-    <section class="panel grow" aria-label="Attivita in tempo reale">
-      <div class="ph">
+    <section id="activity-panel" class="panel grow" aria-label="Attivita in tempo reale">
+      <div class="ph" id="activity-head" role="button" tabindex="0" aria-expanded="true"
+           aria-controls="activity" title="Clicca per nascondere/mostrare il feed attività">
         <svg class="ic"><use href="#i-activity"/></svg>
         <span class="ttl">Attivita</span>
         <span class="acts">
@@ -189,36 +220,67 @@
       <ul id="activity" class="activity" role="log" aria-live="polite"></ul>
     </section>
 
-    <section class="panel grow" aria-label="Report">
+    <section id="report-panel" class="panel grow" aria-label="Report">
       <div class="ph">
         <svg class="ic"><use href="#i-file"/></svg>
         <span class="ttl">Report</span>
+        <nav id="report-tabs" class="rtabs" role="tablist" aria-label="Viste del report">
+          <button type="button" class="rtab active" data-view="report" role="tab"
+                  aria-selected="true" aria-controls="view-report">Report</button>
+          <button type="button" class="rtab" data-view="sources" role="tab" hidden
+                  aria-selected="false" aria-controls="view-sources">Fonti <span id="tab-sources-n" class="rtab-n"></span></button>
+          <button type="button" class="rtab" data-view="verifs" role="tab" hidden
+                  aria-selected="false" aria-controls="view-verifs">Verifiche <span id="tab-verifs-n" class="rtab-n"></span></button>
+        </nav>
         <span class="acts">
-          <button id="coherence-btn" class="hbtn" type="button" hidden
+          <span id="report-search-wrap" class="rsearch-wrap">
+            <input id="report-search" type="search" placeholder="cerca…" autocomplete="off"
+                   aria-label="Cerca nel testo del report" title="Cerca e evidenzia nel report">
+            <span id="report-search-n" class="mono faint" aria-live="polite"></span>
+          </span>
+          <button id="reading-mode-btn" class="hbtn" type="button" aria-pressed="false"
+                  aria-label="Modalità lettura" title="Modalità lettura: nasconde le colonne laterali (Esc per uscire)">
+            <svg class="ic s12"><use href="#i-book"/></svg>
+          </button>
+          <button id="copy-btn" class="hbtn" type="button"
+                  aria-label="Copia il report in markdown" title="Copia il markdown del report negli appunti">
+            <svg class="ic s12"><use href="#i-copy"/></svg>
+          </button>
+          <button id="print-btn" class="hbtn" type="button"
+                  aria-label="Stampa o salva il report in PDF" title="Stampa / salva PDF">
+            <svg class="ic s12"><use href="#i-printer"/></svg>
+          </button>
+          <button id="coherence-btn" class="hbtn wide" type="button" hidden
                   title="Controllo anti-baggianate: numeri, URL e frasi supportate dalle fonti">
             <svg class="ic s12"><use href="#i-check"/></svg>coerenza</button>
         </span>
       </div>
       <div id="verify-stats" class="verify-stats" hidden></div>
       <div id="coherence-panel" class="coherence" hidden></div>
-      <div id="report" class="pb report">
-        <div class="report-empty">
-          <svg class="ic s24"><use href="#i-file"/></svg>
-          <p>Il report apparira qui a fine ricerca,</p>
-          <p class="dim">costruito solo sulle evidenze verificate.</p>
+      <div id="warnings-panel" class="coherence c-warn" hidden></div>
+      <div id="view-report" class="rview">
+        <nav id="report-toc" class="report-toc" hidden aria-label="Indice del report"></nav>
+        <div id="report" class="pb report">
+          <div class="report-empty">
+            <svg class="ic s24"><use href="#i-file"/></svg>
+            <p>Il report apparira qui a fine ricerca,</p>
+            <p class="dim">costruito solo sulle evidenze verificate.</p>
+          </div>
         </div>
       </div>
+      <div id="view-sources" class="rview" hidden></div>
+      <div id="view-verifs" class="rview" hidden></div>
     </section>
   </section>
 
   <!-- ============ DESTRA: dettaglio citazione + impostazioni + decision engine ============ -->
   <aside class="col col-right" aria-label="Dettagli e impostazioni">
-    <section id="popover" class="panel popover" hidden>
+    <section id="popover" class="panel popover" hidden aria-label="Dettaglio citazione">
       <div class="ph">
         <svg class="ic"><use href="#i-book"/></svg>
         <span class="ttl" id="popover-title">Citazione</span>
         <span class="acts">
-          <button id="popover-close" class="btn ico ghost" aria-label="Chiudi dettaglio">
+          <button id="popover-close" class="btn ico ghost" aria-label="Chiudi dettaglio citazione" title="Chiudi (Esc)">
             <svg class="ic s12"><use href="#i-x"/></svg></button>
         </span>
       </div>
@@ -251,7 +313,7 @@
   </aside>
 </main>
 
-<div id="toast" class="toast" hidden></div>
+<div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
 <script src="/app.js"></script>
 </body>
 </html>

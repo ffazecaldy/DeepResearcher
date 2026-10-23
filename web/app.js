@@ -35,9 +35,78 @@ const state = {
   reportJson: null,        // cache per run (citazioni)
   eventSource: null,
   timer: null,
+  endedAt: null,           // fine run (live: Date.now(); storico: da DB)
+  dbStatus: null,          // status del run letto dal DB (loadRun)
+  loadedRun: null,         // {question, depth, language} per "Ripeti ricerca"
+  warnings: null,          // {result:[], ops:[], total} da report.json
+  warningsTotal: 0,
+  stopReason: null,        // ragione di arresto (etichetta italiana)
+  reportMarkdown: null,    // ultimo markdown renderizzato (copia/stampa/ricerca)
+  reportView: "report",    // report | sources | verifs
+  srcRows: null,           // righe vista fonti (con conteggi citazioni)
+  lastCitationBtn: null,   // per Escape: focus all'ultimo bottone citazione
 };
 
 const $ = (id) => document.getElementById(id);
+
+/* ====================== etichette e formati (italiano) ====================== */
+const STATUS_IT = {
+  idle: "in attesa", loading: "caricamento…", running: "in corso",
+  completed: "completata", failed: "fallita", cancelled: "interrotta",
+};
+/* codici stop_reason del backend -> etichetta breve */
+const STOP_IT = {
+  MAX_CICLI: "limite cicli",
+  COPERTURA_COMPLETA: "copertura raggiunta",
+  LIMITE_TEMPO: "limite tempo",
+  LIMITE_PAGINE: "limite pagine",
+  LIMITE_CICLO: "limite ciclo",
+  ANNULLATO: "interrotta",
+  NESSUNA_NOVITA: "nessuna novità",
+  SOTTODOMANDE_NON_RISOLVIBILI: "sotto-domande non risolvibili",
+};
+/* stati di supporto [support:X] scritti dal verifier */
+const SUPPORT_IT = {
+  supported: "supportata", contradicted: "contraddetta",
+  insufficient: "fonti insufficienti", mixed: "prove contrastanti",
+};
+const SUPPORT_HELP = {
+  supported: "le fonti consultate riportano la stessa informazione",
+  contradicted: "almeno una fonte riferisce il contrario",
+  insufficient: "le fonti trovate non bastano a confermarla",
+  mixed: "le fonti sono in disaccordo tra loro",
+};
+const FETCH_IT = {
+  SUCCESS: "letta", PARTIAL_CONTENT: "letta parziale",
+  FETCH_FAILED: "fetch fallito", EXTRACTION_FAILED: "estrazione fallita",
+};
+
+/* durata leggibile: "42 s" / "4 min 32 s" / "1 h 12 min"; null/NaN -> "—" */
+function fmtDur(sec) {
+  if (sec == null || !isFinite(sec) || sec < 0) return "—";
+  sec = Math.round(sec);
+  if (sec < 60) return `${sec} s`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) { const rs = sec % 60; return rs ? `${m} min ${rs} s` : `${m} min`; }
+  const h = Math.floor(m / 60), rm = m % 60;
+  return rm ? `${h} h ${rm} min` : `${h} h`;
+}
+function statusLabel(s) {
+  if (s === "completed-warnings") {
+    return `completata con ${state.warningsTotal || 0} avvisi`;
+  }
+  return STATUS_IT[s] || s;
+}
+function stopTimer() {
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+}
+function startTimer() {
+  stopTimer();
+  state.timer = setInterval(tickTime, 1000);
+}
+function stripSupportPrefix(reason) {
+  return String(reason || "").replace(/^\[support:\w+\]\s*/, "");
+}
 
 /* ============================== api ============================== */
 async function api(path, opts) {
@@ -349,26 +418,51 @@ function handleEvent(ev) {
     if (p.verification) renderVerifyStats(p.verification);
     const cb = $("coherence-btn");
     if (cb) cb.hidden = false;
+    initReportViews();  // tab Fonti/Verifiche ora hanno dati reali
   }
   if (type === "run_completed") {
     // B1: "completata con N avvisi" quando ci sono verifiche fallite
+    state.warningsTotal = state.failedChecks;
+    setStopReason(p.stop_reason, "completed");
     finishRun(state.failedChecks ? "completed-warnings" : "completed");
+    // affina il conteggio avvisi (verifiche FAILED/WEAKENED + fonti fallite)
+    refreshWarnings();
     // B1-fix2: il run attivo e' finito — torniamo in modalita' normale
     if (state.runId === state.activeRunId) state.activeRunId = null;
   }
   if (type === "claim_failed") {
     state.failedChecks = (state.failedChecks || 0) + 1;
   }
-  if (type === "run_failed") finishRun("failed");
-  if (type === "run_cancelled") finishRun("cancelled");
-  if (type === "run_closed") { finishRun(state.status || "completed"); closeStream(); refreshHistory(); collapseActivity(); }
+  if (type === "run_failed") {
+    setStopReason(p.stop_reason, "failed");
+    finishRun("failed");
+  }
+  if (type === "run_cancelled") {
+    setStopReason(p.stop_reason || "ANNULLATO", "cancelled");
+    finishRun("cancelled");
+  }
+  if (type === "run_closed") {
+    // run morto lasciato "running" nel DB (crash del server): il replay finisce
+    // con run_closed senza evento finale — correggiamo lo stato dal DB
+    const st = ["completed", "failed", "cancelled", "completed-warnings"]
+      .includes(state.status)
+      ? state.status
+      : (state.dbStatus && state.dbStatus !== "running" ? state.dbStatus : "completed");
+    finishRun(st);
+    // run morto lasciato "running" nel DB: ended_at non esiste, NON inventare
+    // una durata (mostra "—")
+    if (state.dbStatus === "running") { state.endedAt = null; tickTime(); }
+    closeStream();
+    refreshHistory();
+    collapseActivity();
+  }
   updateStatusbar();
 }
 
 /* ── schede ciclo: una "scheda subagent" per ciclo richiesto ────────────── */
 function expectedCycles() {
   const d = $("depth").value;
-  return d === "rapida" ? 1 : d === "approfondita" ? 5 : 3;
+  return d === "rapida" ? 1 : d === "approfondita" ? 8 : 3;
 }
 
 function updateCycleTabs(type, cycle) {
@@ -513,24 +607,30 @@ function applyHistoryFilter() {
 function setStatus(s) {
   state.status = s;
   const el = $("sb-state");
-  if (s === "completed-warnings") {
-    el.textContent = `completata con ${state.failedChecks} avvisi`;
-    el.className = "badge completed-warnings";
-  } else {
-    el.textContent = s;
-    el.className = `badge ${s}`;
-  }
+  el.textContent = statusLabel(s);
+  el.className = `badge ${s}`;
+  // il badge stato è cliccabile SOLO quando ci sono avvisi da consultare
+  const clickable = s === "completed-warnings" && (state.warningsTotal || 0) > 0;
+  el.disabled = !clickable;
+  el.classList.toggle("clickable", clickable);
+  el.title = clickable ? "Mostra il dettaglio degli avvisi" : "";
   const dot = $("pill-dot");
   dot.className = `dot ${s === "completed-warnings" ? "completed" : s}`;
   $("pill-state").textContent = el.textContent;
-  const running = s === "running";
-  $("stop-btn").hidden = !running;
-  $("start-btn").disabled = running;
+  const rs = $("rh-status");
+  if (rs) { rs.textContent = statusLabel(s); rs.className = `badge ${s}`; }
+  // Interrompi SOLO se il run visualizzato è davvero il nostro run in corso
+  // (attivo qui, oppure osservato dopo reload: il DB lo segnala "running")
+  const reallyRunning = s === "running" &&
+    (state.runId === state.activeRunId || state.dbStatus === "running");
+  $("stop-btn").hidden = !reallyRunning;
+  $("start-btn").disabled = s === "running";
 }
 
 function finishRun(s) {
+  if (state.status === "running" && !state.endedAt) state.endedAt = Date.now();
+  stopTimer();
   setStatus(s);
-  if (state.timer) { clearInterval(state.timer); state.timer = null; }
   // B14: il marker "verifica in corso" della bozza non deve mai sopravvivere
   // alla fine del run (run vecchi senza report_final lo lasciavano stampato)
   const rep = $("report");
@@ -538,6 +638,12 @@ function finishRun(s) {
     rep.innerHTML = rep.innerHTML.replaceAll("*verifica in corso...*", "")
                                  .replaceAll("*verifica in corso…*", "");
   }
+  // a fine ricerca (solo run LIVE avviato qui) il Report va in primo piano:
+  // il replay di un run storico non deve sovrascrivere la preferenza utente
+  if (state.runId && state.runId === state.activeRunId) {
+    setActivityCollapsed(true, true);
+  }
+  tickTime();
 }
 
 function updateStatusbar() {
@@ -551,10 +657,18 @@ function updateStatusbar() {
   $("sb-engine").textContent = state.engine;
 }
 
+/* durata: live se il run mostrato è in corso, altrimenti quella salvata
+   calcolata da started_at/ended_at; timestamp mancanti/invalidi -> "—" */
 function tickTime() {
-  if (!state.startedAt) return;
-  const s = Math.floor((Date.now() - state.startedAt) / 1000);
-  $("sb-time").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  let txt = "—";
+  if (state.status === "running" && state.startedAt) {
+    txt = fmtDur((Date.now() - state.startedAt) / 1000);
+  } else if (state.startedAt && state.endedAt) {
+    txt = fmtDur((state.endedAt - state.startedAt) / 1000);
+  }
+  $("sb-time").textContent = txt;
+  const rd = $("rh-duration");
+  if (rd) rd.textContent = txt;
 }
 
 /* ============================== report ============================== */
@@ -567,17 +681,46 @@ function renderInline(text) {
   let s = escapeHtml(text);
   s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  /* accorpa marker adiacenti identici SOLO al render: [13] [13] -> [13] */
+  s = s.replace(/\[(\d+)\](?:\s*\[\1\])+/g, "[$1]");
   s = s.replace(/\[(\d+)\]/g, '<button class="citation" data-n="$1">[$1]</button>');
   s = s.replace(/(https?:\/\/[^\s<)]+)/g,
     '<a href="$1" target="_blank" rel="noopener">$1</a>');
   return s;
 }
 
+/* tabella markdown -> wrapper scrollabile orizzontale (non allarga la pagina) */
+function renderMdTable(rows) {
+  const cells = (r) => r.replace(/^\|/, "").replace(/\|$/, "").split("|")
+    .map((c) => c.trim());
+  let html = '<div class="table-wrap"><table>';
+  let bodyRow = 0;
+  for (const raw of rows) {
+    const cs = cells(raw);
+    if (cs.every((c) => /^:?-{2,}:?$/.test(c) || c === "")) continue;  // separatore
+    const tag = bodyRow === 0 ? "th" : "td";
+    html += "<tr>" + cs.map((c) => `<${tag}>${renderInline(c)}</${tag}>`).join("") + "</tr>";
+    bodyRow += 1;
+  }
+  return html + "</table></div>";
+}
+
 function renderReport(markdown) {
+  state.reportMarkdown = markdown;
   const out = [];
-  for (const line of markdown.split("\n")) {
-    const t = line.trim();
+  const lines = String(markdown).split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) { out.push('<div class="sp"></div>'); continue; }
+    if (t.startsWith("|") && t.endsWith("|")) {
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        rows.push(lines[i].trim()); i += 1;
+      }
+      i -= 1;
+      out.push(renderMdTable(rows));
+      continue;
+    }
     const h = t.match(/^(#{1,3})\s+(.*)$/);
     if (h) {
       out.push(`<h${h[1].length + 1}>${renderInline(h[2])}</h${h[1].length + 1}>`);
@@ -588,6 +731,74 @@ function renderReport(markdown) {
     }
   }
   $("report").innerHTML = out.join("");
+  buildToc();
+}
+
+/* indice delle sezioni: lista cliccabile dagli h2/h3/h4, solo se >= 3 titoli */
+function buildToc() {
+  const rep = $("report"), toc = $("report-toc");
+  if (!rep || !toc) return;
+  const heads = Array.from(rep.querySelectorAll("h2, h3, h4"));
+  if (heads.length < 3) { toc.hidden = true; toc.innerHTML = ""; return; }
+  heads.forEach((h, i) => { if (!h.id) h.id = `sec-${i + 1}`; });
+  toc.innerHTML = '<div class="toc-ttl">indice</div><ul>' +
+    heads.map((h) => {
+      const lvl = h.tagName.toLowerCase();
+      return `<li class="toc-${lvl}"><a href="#${h.id}">${escapeHtml(h.textContent)}</a></li>`;
+    }).join("") + "</ul>";
+  toc.hidden = false;
+  const smooth = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+  toc.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    const t = document.getElementById(a.getAttribute("href").slice(1));
+    if (t) t.scrollIntoView({ behavior: smooth, block: "start" });
+  }));
+}
+
+/* ── ricerca nel testo del report: evidenzia con <mark> e conta ─────────── */
+let _searchTimer = null;
+function onReportSearch(v) {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(() => highlightReport(v), 200);
+}
+function highlightReport(q) {
+  if (state.reportMarkdown != null) renderReport(state.reportMarkdown);  // rebuild pulito
+  const nEl = $("report-search-n");
+  q = (q || "").trim();
+  if (!q) { if (nEl) nEl.textContent = ""; return; }
+  const root = $("report");
+  if (!root) return;
+  const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement &&
+      n.parentElement.closest("button.citation"))
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+  });
+  const nodes = [];
+  let n;
+  while ((n = walker.nextNode())) nodes.push(n);
+  let count = 0;
+  for (const node of nodes) {
+    const text = node.nodeValue;
+    rx.lastIndex = 0;
+    if (!rx.test(text)) continue;
+    rx.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    while ((m = rx.exec(text))) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const mk = document.createElement("mark");
+      mk.textContent = m[0];
+      frag.appendChild(mk);
+      last = m.index + m[0].length;
+      count += 1;
+      if (m[0].length === 0) rx.lastIndex += 1;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  }
+  if (nEl) nEl.textContent = `${count} trovati`;
 }
 
 /* ====================== popover citazioni ====================== */
@@ -677,10 +888,24 @@ async function loadReportJson() {
   return state.reportJson;
 }
 
-function closePopover() {
+/* ── selezione citazione: evidenzia il bottone e ricorda il focus ───────── */
+function selectCitation(btn) {
+  document.querySelectorAll("button.citation.citation-sel")
+    .forEach((b) => b.classList.remove("citation-sel"));
+  btn.classList.add("citation-sel");
+  state.lastCitationBtn = btn;
+}
+
+function closePopover(refocus = false) {
   $("popover").hidden = true;
   const hint = $("popover-hint");
   if (hint) hint.hidden = false;
+  document.querySelectorAll("button.citation.citation-sel")
+    .forEach((b) => b.classList.remove("citation-sel"));
+  // Escape: il focus torna all'ultimo bottone citazione cliccato
+  if (refocus && state.lastCitationBtn && document.contains(state.lastCitationBtn)) {
+    state.lastCitationBtn.focus();
+  }
 }
 
 /* ============================== history ============================== */
@@ -702,10 +927,12 @@ async function refreshHistory() {
     const date = r.started_at
       ? new Date(r.started_at * 1000).toLocaleString("it-IT",
         { dateStyle: "short", timeStyle: "short" }) : "";
+    // stati della cronologia in italiano, uniformi alla statusbar
+    const stLabel = STATUS_IT[r.status] || r.status;
     const html =
       `<div class="q">${escapeHtml(String(r.question).slice(0, 90))}</div>` +
       `<div class="meta"><span class="badge ${escapeHtml(r.status)}">` +
-      `${escapeHtml(r.status)}</span><span>${escapeHtml(date)}</span>` +
+      `${escapeHtml(stLabel)}</span><span>${escapeHtml(date)}</span>` +
       `<span class="actions">` +
       `<a href="/api/runs/${r.id}/report.md" download title="esporta markdown">` +
       `${icon("download", "ic s12")}</a>` +
@@ -787,11 +1014,31 @@ async function loadRun(runId, opts = {}) {
     }
     // B1-fix2: non toccare lo stato "running" del run attivo quando guardi un altro
     const isActiveRun = state.activeRunId && runId === state.activeRunId;
-    setStatus(isActiveRun ? "running" : (run.status || "completed"));
+    const st = isActiveRun ? "running" : (run.status || "completed");
+    state.dbStatus = isActiveRun ? null : (run.status || null);
+    setStatus(st);
+    // durata: NESSUN timer per i run chiusi; quella salvata da started/ended_at.
+    // Il timer riparte solo se il run è davvero ancora in corso.
     state.startedAt = run.started_at ? run.started_at * 1000 : null;
+    state.endedAt = run.ended_at ? run.ended_at * 1000 : null;
+    stopTimer();
+    if (st === "running" && state.startedAt) startTimer();
     tickTime();
+    state.loadedRun = {
+      question: run.question || "",
+      depth: run.depth || "",
+      language: run.language || "auto",
+    };
+    updateRunHeader(run);
+    // ragione di arresto dai dati del DB (limits_json contiene stop_reason)
+    let stopCode = null;
+    try { stopCode = (JSON.parse(run.limits_json || "null") || {}).stop_reason || null; }
+    catch { /* limits_json malformato: nessuna ragione mostrata */ }
+    setStopReason(st === "running" ? null : stopCode, st);
     listenEvents(runId); // replay + chiusura
     updateStatusbar();
+    if (detail.report) initReportViews();
+    if (st === "completed" || st === "completed-warnings") refreshWarnings();
   } catch (e) {
     toast(`Errore caricamento: ${e.message}`);
     setStatus(state.activeRunId ? "running" : "idle");
@@ -802,7 +1049,11 @@ async function deleteRun(runId) {
   if (!confirm("Eliminare definitivamente questo run?")) return;
   try {
     await api(`/api/runs/${runId}`, { method: "DELETE" });
-    if (state.runId === runId) resetPanels();
+    if (state.runId === runId) {
+      resetPanels();
+      setStatus("idle");
+      state.runId = null;
+    }
     await refreshHistory();
   } catch (e) { toast(`Eliminazione fallita: ${e.message}`); }
 }
@@ -860,6 +1111,7 @@ function initTheme() {
 
 /* ============================== run lifecycle ============================== */
 function resetPanels() {
+  stopTimer();
   $("activity").innerHTML = "";
   $("feed-count").textContent = "0 eventi";
   setReportEmpty();
@@ -868,6 +1120,8 @@ function resetPanels() {
   setAction("", false);
   state.reading = 0;
   state.failedChecks = 0;
+  state.warnings = null;
+  state.warningsTotal = 0;
   state.seenPageEvents = new Set();
   const ri = $("reading-indicator");
   if (ri) ri.hidden = true;
@@ -878,14 +1132,44 @@ function resetPanels() {
   if (cb) cb.hidden = true;
   const cp = $("coherence-panel");
   if (cp) { cp.hidden = true; cp.innerHTML = ""; }
+  const wp = $("warnings-panel");
+  if (wp) { wp.hidden = true; wp.innerHTML = ""; }
   const vs = $("verify-stats");
   if (vs) { vs.hidden = true; vs.innerHTML = ""; }
   state.cycle = null;
   state.counters = { sources: 0, evidence: 0, queries: 0, claims: 0,
                      tokens: 0, llm: 0 };
   state.reportJson = null;
-  state.startedAt = Date.now();
-  $("sb-time").textContent = "0:00";
+  state.reportMarkdown = null;
+  state.startedAt = null;
+  state.endedAt = null;
+  state.dbStatus = null;
+  state.loadedRun = null;
+  state.srcRows = null;
+  setStopReason(null);
+  // viste report: torna al Report, tab nascoste finché non ci sono dati reali
+  const rs = $("report-search");
+  if (rs) rs.value = "";
+  const rn = $("report-search-n");
+  if (rn) rn.textContent = "";
+  setReportView("report");
+  const ts = $("report-tabs");
+  if (ts) {
+    ts.querySelector('[data-view="sources"]').hidden = true;
+    ts.querySelector('[data-view="verifs"]').hidden = true;
+  }
+  const tsn = $("tab-sources-n");
+  if (tsn) tsn.textContent = "";
+  const tvn = $("tab-verifs-n");
+  if (tvn) tvn.textContent = "";
+  const vr = $("view-sources");
+  if (vr) vr.innerHTML = "";
+  const vv = $("view-verifs");
+  if (vv) vv.innerHTML = "";
+  const rh = $("run-header");
+  if (rh) rh.hidden = true;
+  applyActivityPref();
+  $("sb-time").textContent = "—";
   updateStatusbar();
 }
 
@@ -941,9 +1225,13 @@ async function startRun(e) {
     state.runId = resp.run_id;
     state.activeRunId = resp.run_id;  // B1-fix2: run avviato qui = run attivo
     state.observedOther = false;
+    state.startedAt = Date.now();
+    state.endedAt = null;
+    state.loadedRun = { question, depth: body.depth, language: $("language").value };
+    updateRunHeader({ question, started_at: Date.now() / 1000 });
     setStatus("running");
-    if (state.timer) clearInterval(state.timer);
-    state.timer = setInterval(tickTime, 1000);
+    startTimer();
+    tickTime();
     listenEvents(resp.run_id);
     refreshHistory();
   } catch (err) {
@@ -962,15 +1250,377 @@ async function stopRun() {
   } catch (e) { toast(`Cancel fallito: ${e.message}`); }
 }
 
+/* ====================== run header + arresto ====================== */
+function updateRunHeader(run) {
+  const rh = $("run-header");
+  if (!rh || !run) return;
+  rh.hidden = false;
+  $("rh-question").textContent = run.question || "";
+  $("rh-date").textContent = run.started_at
+    ? new Date(run.started_at * 1000).toLocaleString("it-IT",
+      { dateStyle: "short", timeStyle: "short" }) : "—";
+  const rb = $("repeat-btn");
+  if (rb) rb.hidden = !state.loadedRun;
+  tickTime();
+}
+
+/* etichetta ragione di arresto vicino allo stato (solo a fine ricerca) */
+function setStopReason(code, finalStatus) {
+  const el = $("rh-stop");
+  if (!el) return;
+  let label = null;
+  if (code && STOP_IT[code]) label = STOP_IT[code];
+  else if (code) label = String(code).toLowerCase().replace(/_/g, " ");
+  else if (finalStatus === "failed") label = "errore";
+  state.stopReason = label;
+  if (!label) { el.hidden = true; el.textContent = ""; return; }
+  el.textContent = `arresto: ${label}`;
+  el.hidden = false;
+}
+
+/* ====================== collasso pannello Attività ====================== */
+function setActivityCollapsed(collapsed, save) {
+  const panel = $("activity-panel");
+  if (!panel) return;
+  panel.classList.toggle("collapsed", collapsed);
+  const head = $("activity-head");
+  if (head) head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  if (save) localStorage.setItem("dr_activity", collapsed ? "1" : "0");
+}
+function applyActivityPref() {
+  setActivityCollapsed(localStorage.getItem("dr_activity") === "1", false);
+}
+
+/* ====================== modalità lettura ====================== */
+function setReading(on, save = true) {
+  document.body.classList.toggle("reading", on);
+  const b = $("reading-mode-btn");
+  if (b) {
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.classList.toggle("on", on);
+    b.title = on ? "Esci dalla modalità lettura (Esc)"
+                 : "Modalità lettura: nasconde le colonne laterali";
+  }
+  if (save) localStorage.setItem("dr_reading", on ? "1" : "0");
+}
+
+/* ====================== avvisi consultabili ====================== */
+/* problemi del risultato: verifiche FAILED/WEAKENED (frase + motivo);
+   problemi operativi: fonti non lette (url + errore). Dati da report.json. */
+async function computeWarnings() {
+  const data = await loadReportJson();
+  if (!data || data.notFound) return null;
+  const claimsById = new Map((data.claims || []).map((c) => [c.id, c]));
+  const result = [], ops = [];
+  for (const v of data.verifications || []) {
+    if (v.verdict === "FAILED" || v.verdict === "WEAKENED") {
+      const c = claimsById.get(v.claim_id);
+      result.push({
+        kind: v.verdict,
+        text: (c && c.text) || "(claim non disponibile)",
+        reason: stripSupportPrefix(v.reason),
+      });
+    }
+  }
+  for (const s of data.sources || []) {
+    if (s.error || s.fetch_status === "FETCH_FAILED" ||
+        s.fetch_status === "EXTRACTION_FAILED") {
+      ops.push({ url: s.url_final || s.url || "",
+                 error: s.error || FETCH_IT[s.fetch_status] || "errore" });
+    }
+  }
+  return { result, ops, total: result.length + ops.length };
+}
+
+async function refreshWarnings() {
+  try {
+    const w = await computeWarnings();
+    state.warnings = w;
+    state.warningsTotal = w ? w.total : 0;
+    if (w && w.total > 0 &&
+        (state.status === "completed" || state.status === "completed-warnings")) {
+      setStatus("completed-warnings");
+    } else if ((!w || w.total === 0) && state.status === "completed-warnings") {
+      setStatus("completed");
+    }
+    const wp = $("warnings-panel");
+    if (wp && !wp.hidden) renderWarningsPanel();
+  } catch { /* report non disponibile: nessun avviso calcolabile */ }
+}
+
+function toggleWarningsPanel() {
+  const wp = $("warnings-panel");
+  if (!wp || !(state.warningsTotal > 0)) return;
+  if (wp.hidden) renderWarningsPanel();
+  else wp.hidden = true;
+}
+
+function renderWarningsPanel() {
+  const wp = $("warnings-panel");
+  const w = state.warnings;
+  if (!wp || !w || !w.total) { if (wp) wp.hidden = true; return; }
+  const parts = [`<div class="coherence-head"><span class="c-badge">${w.total} avvisi</span>` +
+    `<span class="cr">dettaglio degli avvisi della ricerca</span>` +
+    `<button id="warnings-close" class="hbtn" type="button" aria-label="Chiudi avvisi" title="Chiudi">` +
+    `<svg class="ic s12" aria-hidden="true"><use href="#i-x"/></svg></button></div>`];
+  if (w.result.length) {
+    parts.push('<div class="w-sec">Problemi del risultato</div><ul>');
+    for (const r of w.result) {
+      parts.push(`<li><b class="ct ${r.kind === "FAILED" ? "t-unsupported" : "t-uncovered"}">` +
+        `${r.kind === "FAILED" ? "verifica fallita" : "verifica indebolita"}</b>` +
+        `${escapeHtml(r.text.slice(0, 180))}` +
+        (r.reason ? `<span class="cr"> — ${escapeHtml(r.reason.slice(0, 160))}</span>` : "") +
+        `</li>`);
+    }
+    parts.push("</ul>");
+  }
+  if (w.ops.length) {
+    parts.push('<div class="w-sec">Problemi operativi</div><ul>');
+    for (const o of w.ops) {
+      parts.push(`<li><b class="ct t-unknown_url">fonte non letta</b>` +
+        `<span class="mono">${escapeHtml(shortUrl(o.url))}</span>` +
+        `<span class="cr"> — ${escapeHtml(String(o.error).slice(0, 140))}</span></li>`);
+    }
+    parts.push("</ul>");
+  }
+  wp.innerHTML = parts.join("");
+  wp.hidden = false;
+  const xc = $("warnings-close");
+  if (xc) xc.addEventListener("click", () => { wp.hidden = true; });
+}
+
+/* ====================== viste Report / Fonti / Verifiche ====================== */
+function setReportView(name) {
+  state.reportView = name;
+  const map = { report: "view-report", sources: "view-sources", verifs: "view-verifs" };
+  for (const [view, id] of Object.entries(map)) {
+    const el = $(id);
+    if (el) el.hidden = view !== name;
+  }
+  document.querySelectorAll("#report-tabs .rtab").forEach((b) => {
+    const on = b.dataset.view === name;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  });
+}
+
+/* carica report.json e popola tab + viste (solo con dati reali) */
+async function initReportViews() {
+  try {
+    const data = await loadReportJson();
+    if (!data || data.notFound) return;
+    const nSrc = (data.sources || []).length;
+    const nVer = (data.verifications || []).length;
+    const tabSrc = document.querySelector('#report-tabs [data-view="sources"]');
+    const tabVer = document.querySelector('#report-tabs [data-view="verifs"]');
+    if (tabSrc) tabSrc.hidden = nSrc === 0;
+    if (tabVer) tabVer.hidden = nVer === 0;
+    if (nSrc) {
+      renderSourcesView(data);
+      const t = $("tab-sources-n");
+      if (t) t.textContent = String(nSrc);
+    }
+    if (nVer) {
+      renderVerifsView(data);
+      const t = $("tab-verifs-n");
+      if (t) t.textContent = String(nVer);
+    }
+    if ((nSrc === 0 && state.reportView === "sources") ||
+        (nVer === 0 && state.reportView === "verifs")) {
+      setReportView("report");
+    }
+  } catch { /* report.json non disponibile: restano solo il Report */ }
+}
+
+/* numero di citazioni del report che poggiano su ciascuna fonte */
+function citationCounts(data) {
+  const bySource = new Map();
+  const evById = new Map((data.evidences || []).map((e) => [e.evidence_id, e]));
+  for (const c of data.claims || []) {
+    const n = c.final_citation_no ?? c.citation_no;
+    if (n == null) continue;
+    for (const eid of c.evidence_ids || []) {
+      const e = evById.get(eid);
+      if (!e || !e.source_id) continue;
+      if (!bySource.has(e.source_id)) bySource.set(e.source_id, new Set());
+      bySource.get(e.source_id).add(n);
+    }
+  }
+  return bySource;
+}
+
+function renderSourcesView(data) {
+  const box = $("view-sources");
+  if (!box) return;
+  const bySource = citationCounts(data);
+  // duplicati/riusi: stesso content_hash nel run (dedup per contenuto)
+  const hashCount = {};
+  for (const s of data.sources || []) {
+    if (s.content_hash) hashCount[s.content_hash] = (hashCount[s.content_hash] || 0) + 1;
+  }
+  state.srcRows = (data.sources || []).map((s) => {
+    const cites = bySource.get(s.id);
+    return {
+      s,
+      cites: cites ? cites.size : 0,
+      nums: cites ? Array.from(cites).sort((a, b) => a - b) : [],
+      dup: !!(s.content_hash && hashCount[s.content_hash] > 1),
+    };
+  });
+  const lette = state.srcRows.filter((r) =>
+    r.s.fetch_status === "SUCCESS" || r.s.fetch_status === "PARTIAL_CONTENT").length;
+  const citate = state.srcRows.filter((r) => r.cites > 0).length;
+  box.innerHTML =
+    `<div class="rview-bar">` +
+    `<span class="src-counters mono" title="Fonti trovate / lette / citate nel report">` +
+    `trovate <b>${(data.sources || []).length}</b> · lette <b>${lette}</b> · citate <b>${citate}</b></span>` +
+    `<input id="src-filter" type="search" placeholder="filtra fonti…" autocomplete="off" ` +
+    `aria-label="Filtra le fonti"></div>` +
+    `<ul id="src-list" class="src-list"></ul>`;
+  renderSrcList("");
+  const f = $("src-filter");
+  if (f) f.addEventListener("input", (e) => renderSrcList(e.target.value));
+}
+
+function renderSrcList(q) {
+  const ul = $("src-list");
+  if (!ul || !state.srcRows) return;
+  q = (q || "").toLowerCase().trim();
+  const rows = state.srcRows.filter(({ s }) => !q ||
+    `${s.title || ""} ${s.url || ""} ${s.domain || ""}`.toLowerCase().includes(q));
+  ul.innerHTML = rows.map(({ s, cites, nums, dup }) => {
+    const url = s.url_final || s.url || "";
+    const bits = [];
+    if (s.source_type) bits.push(`tipo ${escapeHtml(s.source_type)}`);
+    if (s.fetch_status) bits.push(escapeHtml(FETCH_IT[s.fetch_status] || s.fetch_status));
+    else if (s.http_status) bits.push(`http ${s.http_status}`);
+    if (s.published_at) bits.push(escapeHtml(String(s.published_at).slice(0, 10)));
+    return `<li>` +
+      `<div class="src-line"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">` +
+      `${escapeHtml(s.title || url)}</a>` +
+      (dup ? '<span class="badge neutral" title="Contenuto duplicato di un\'altra fonte nel run">duplicato</span>' : "") +
+      `</div>` +
+      `<div class="src-meta">` +
+      (s.domain ? `<span>${escapeHtml(s.domain)}</span>` : "") +
+      bits.map((b) => `<span>${b}</span>`).join("") +
+      (cites ? `<span class="src-cites" title="Citazioni di questa fonte nel report">` +
+        `[${nums.join("][")}] · ${cites} ${cites === 1 ? "citazione" : "citazioni"}</span>`
+             : '<span class="faint">non citata</span>') +
+      `</div></li>`;
+  }).join("") || '<li class="dim">Nessuna fonte corrisponde al filtro.</li>';
+}
+
+/* prefisso [support:X] scritto dal verifier in verdict_reason */
+function parseSupport(reason) {
+  const m = /^\[support:(supported|contradicted|insufficient|mixed)\]\s*/
+    .exec(String(reason || ""));
+  return m ? { support: m[1], rest: reason.slice(m[0].length) }
+           : { support: null, rest: String(reason || "") };
+}
+
+function renderVerifsView(data) {
+  const box = $("view-verifs");
+  if (!box) return;
+  const claimsById = new Map((data.claims || []).map((c) => [c.id, c]));
+  const evById = new Map((data.evidences || []).map((e) => [e.evidence_id, e]));
+  const parts = ['<div class="verif-legend mono">stati di supporto: ' +
+    Object.keys(SUPPORT_IT).map((k) => `<b>${k}</b> = ${SUPPORT_HELP[k]}`).join(" · ") +
+    '</div><ul class="verif-list">'];
+  for (const v of data.verifications || []) {
+    const c = claimsById.get(v.claim_id);
+    const { support, rest } = parseSupport(v.reason);
+    const n = c ? (c.final_citation_no ?? c.citation_no) : null;
+    const evs = c ? (c.evidence_ids || []).map((id) => evById.get(id)).filter(Boolean) : [];
+    let evHtml = "";
+    if (evs.length) {
+      evHtml = n != null
+        ? `<button type="button" class="hbtn wide ev-link" data-cit="${n}" ` +
+          `title="Apri il dettaglio delle evidenze nel pannello citazioni">` +
+          `evidenze (${evs.length})</button>`
+        : `<span class="cr mono" title="Quote dell'evidenza">“${escapeHtml(String(evs[0].quote || "").slice(0, 140))}”</span>`;
+    }
+    parts.push(`<li>` +
+      `<div class="verif-head"><span class="verdict ${escapeHtml(v.verdict)}">` +
+      `${escapeHtml(v.verdict)}</span>` +
+      (support ? `<span class="sup sup-${support}" title="${SUPPORT_IT[support]}: ${SUPPORT_HELP[support]}">${SUPPORT_IT[support]}</span>` : "") +
+      `</div>` +
+      `<div class="verif-text">${escapeHtml((c && c.text) || "(claim rimosso dal report)")}</div>` +
+      (rest ? `<div class="cr">${escapeHtml(rest.slice(0, 220))}</div>` : "") +
+      (evHtml ? `<div class="verif-foot">${evHtml}</div>` : "") +
+      `</li>`);
+  }
+  parts.push("</ul>");
+  box.innerHTML = parts.join("");
+  box.querySelectorAll(".ev-link").forEach((b) => b.addEventListener("click", () => {
+    openCitation(b.dataset.cit).catch((x) => toast(x.message));
+  }));
+}
+
+/* ====================== ripeti ricerca ====================== */
+function repeatRun() {
+  const r = state.loadedRun;
+  if (!r) return;
+  if (state.status === "running") { toast("Interrompi il run corrente prima."); return; }
+  $("question").value = r.question || "";
+  if (r.depth) {
+    const opt = $("depth").querySelector(`option[value="${r.depth}"]`);
+    if (opt) $("depth").value = r.depth;
+  }
+  if (r.language) {
+    const opt = $("language").querySelector(`option[value="${r.language}"]`);
+    $("language").value = opt ? r.language : "auto";
+  }
+  $("question").focus();
+  toast("Domanda e opzioni precompilate: controlla e premi Avvia.");
+}
+
 /* ============================== init ============================== */
 function init() {
   initTheme();
+  // modalità lettura salvata dall'ultima sessione
+  setReading(localStorage.getItem("dr_reading") === "1", false);
   $("run-form").addEventListener("submit", startRun);
   $("stop-btn").addEventListener("click", stopRun);
-  $("popover-close").addEventListener("click", closePopover);
+  $("popover-close").addEventListener("click", () => closePopover(true));
   $("history-clear").addEventListener("click", clearHistory);
   $("coherence-btn").addEventListener("click", runCoherence);
   $("history-filter").addEventListener("input", applyHistoryFilter);
+  // badge stato cliccabile: apre/chiude il dettaglio degli avvisi
+  $("sb-state").addEventListener("click", toggleWarningsPanel);
+  // ripeti ricerca: precompila domanda + opzioni
+  $("repeat-btn").addEventListener("click", repeatRun);
+  // azioni report
+  $("copy-btn").addEventListener("click", async () => {
+    const md = state.reportMarkdown;
+    if (!md) { toast("Nessun report da copiare."); return; }
+    try {
+      await navigator.clipboard.writeText(md);
+      toast("Report copiato negli appunti (markdown).");
+    } catch {
+      toast("Copia non riuscita: il browser ha negato l'accesso agli appunti.");
+    }
+  });
+  $("print-btn").addEventListener("click", () => {
+    if (!state.reportMarkdown) { toast("Nessun report da stampare."); return; }
+    setReportView("report");
+    window.print();
+  });
+  $("reading-mode-btn").addEventListener("click", () =>
+    setReading(!document.body.classList.contains("reading")));
+  // tab Report / Fonti / Verifiche
+  $("report-tabs").addEventListener("click", (e) => {
+    const b = e.target.closest(".rtab");
+    if (b && !b.hidden) setReportView(b.dataset.view);
+  });
+  // ricerca nel testo del report (highlight <mark> + conteggio)
+  $("report-search").addEventListener("input", (e) => onReportSearch(e.target.value));
+  // pannello Attività: header cliccabile (collapse/expand)
+  const ahead = $("activity-head");
+  ahead.addEventListener("click", () =>
+    setActivityCollapsed(!$("activity-panel").classList.contains("collapsed"), true));
+  ahead.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); ahead.click(); }
+  });
   // header "Nuova ricerca" = reset visibile di modulo e pannelli
   const formReset = $("form-reset");
   formReset.addEventListener("click", () => {
@@ -1015,11 +1665,19 @@ function init() {
       "aria-expanded", plan.classList.contains("collapsed") ? "false" : "true");
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closePopover();
+    if (e.key !== "Escape") return;
+    // Escape: prima chiude il popover citazione (focus al bottone [n]),
+    // altrimenti esce dalla modalità lettura
+    if (!$("popover").hidden) closePopover(true);
+    else if (document.body.classList.contains("reading")) setReading(false);
   });
   document.addEventListener("click", (e) => {
     const btn = e.target.closest("button.citation");
-    if (btn) { openCitation(btn.dataset.n).catch((x) => toast(x.message)); return; }
+    if (btn) {
+      selectCitation(btn);
+      openCitation(btn.dataset.n).catch((x) => toast(x.message));
+      return;
+    }
     if (!$("popover").hidden && !e.target.closest("#popover")) closePopover();
   });
   loadSettings();
