@@ -359,8 +359,10 @@ html[data-theme="light"] button.citation:hover{color:#fffaf0}
 .coherence li b.ct.t-unknown_url{color:var(--warn)}
 .coherence .cr{color:var(--faint)}
 
-/* ── riga statistiche verifica ──────────────────────────────────────── */
-.verify-stats{display:inline-flex;gap:8px;font-family:var(--mono);font-size:10px}
+/* ── riga statistiche verifica: striscia propria, niente sovrapposizioni ── */
+.verify-stats{display:flex;flex-wrap:wrap;gap:4px 14px;padding:6px 12px;
+  border-bottom:1px solid var(--line);font-family:var(--mono);font-size:10.5px}
+.verify-stats[hidden]{display:none}
 .verify-stats .vs{white-space:nowrap}
 .verify-stats .vs.ok{color:var(--gain)}
 .verify-stats .vs.fix{color:var(--amber)}

@@ -361,7 +361,7 @@ function handleEvent(ev) {
   }
   if (type === "run_failed") finishRun("failed");
   if (type === "run_cancelled") finishRun("cancelled");
-  if (type === "run_closed") { closeStream(); refreshHistory(); collapseActivity(); }
+  if (type === "run_closed") { finishRun(state.status || "completed"); closeStream(); refreshHistory(); collapseActivity(); }
   updateStatusbar();
 }
 
@@ -531,6 +531,13 @@ function setStatus(s) {
 function finishRun(s) {
   setStatus(s);
   if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  // B14: il marker "verifica in corso" della bozza non deve mai sopravvivere
+  // alla fine del run (run vecchi senza report_final lo lasciavano stampato)
+  const rep = $("report");
+  if (rep && rep.textContent.includes("verifica in corso")) {
+    rep.innerHTML = rep.innerHTML.replaceAll("*verifica in corso...*", "")
+                                 .replaceAll("*verifica in corso…*", "");
+  }
 }
 
 function updateStatusbar() {
