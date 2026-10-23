@@ -99,11 +99,14 @@ html[data-theme="light"] .btn.pri{color:#fffaf0}
 .panel.grow{flex:1 1 auto;min-height:120px}
 .ph{height:27px;flex:none;display:flex;align-items:center;gap:7px;padding:0 8px;
   background:var(--panel2);border-bottom:1px solid var(--line2)}
+.ph .acts{margin-left:auto;display:flex;align-items:center;gap:4px;flex:none}
 .ph .ttl{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
   text-transform:uppercase;color:var(--dim);white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
+/* B14: il contenuto dell'header non deve mai uscire dal pannello:
+   il titolo cede spazio, le azioni restano intere */
+.ph .ttl{flex:1 1 auto;min-width:0}
 .ph .ic{color:var(--amber)}
-.ph .acts{margin-left:auto;display:flex;align-items:center;gap:4px}
 .pb{flex:1;overflow:auto;padding:8px;min-height:0}
 .pb.report{padding:10px 12px}
 .report-empty{height:100%;min-height:140px;display:flex;flex-direction:column;
@@ -162,9 +165,11 @@ html[data-theme="light"] .btn.danger:hover{background:rgba(180,67,60,.07)}
 .history li.active{border-color:var(--amber-dk);background:var(--sel)}
 .history .q{font-size:12px;line-height:1.4;margin-bottom:4px;overflow:hidden;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-.history .meta{display:flex;gap:7px;align-items:center;font-family:var(--mono);
-  font-size:9.5px;color:var(--faint)}
-.history .actions{margin-left:auto;display:inline-flex;gap:5px}
+.history .meta{display:flex;flex-wrap:wrap;gap:4px 7px;align-items:center;
+  font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+/* B14: le azioni (md/json/pdf/cestino) devono restare visibili: quando la
+   riga non basta vanno a capo invece di uscire dal bordo del pannello */
+.history .actions{margin-left:auto;display:inline-flex;gap:5px;flex:none}
 .history .actions a,.history .actions button{display:inline-flex;align-items:center;
   color:var(--faint);background:none;border:none;cursor:pointer;padding:1px;
   text-decoration:none;font-family:var(--mono);font-size:9.5px;
@@ -323,10 +328,11 @@ html[data-theme="light"] button.citation:hover{color:#fffaf0}
 .server-banner .hbtn:hover{border-color:#fff;color:#fff;background:rgba(0,0,0,.15)}
 
 /* ── stepper fasi ────────────────────────────────────────────────────── */
-.stepper{display:flex;gap:2px;list-style:none;margin:0 0 6px;padding:0;
+.stepper{display:flex;gap:2px;list-style:none;margin:0 6px 6px 0;padding:0;
   font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
 .stepper .step{flex:1;display:flex;align-items:center;gap:6px;padding:5px 8px;
-  border:1px solid var(--line);color:var(--faint)}
+  border:1px solid var(--line);color:var(--faint);min-width:0;overflow:hidden;
+  white-space:nowrap}
 .stepper .step:first-child{border-radius:4px 0 0 4px}
 .stepper .step:last-child{border-radius:0 4px 4px 0}
 .stepper .step+.step{border-left:none}
