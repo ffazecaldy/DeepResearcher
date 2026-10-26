@@ -108,7 +108,10 @@ html[data-theme="light"] .btn.pri{color:#fffaf0}
 .ph .ttl{flex:1 1 auto;min-width:0}
 .ph .ic{color:var(--amber)}
 .pb{flex:1;overflow:auto;padding:8px;min-height:0}
-.pb.report{padding:10px 12px}
+/* FIX 9: #report non scrolla piu' lui: scrolla #report-scroll (viewport pieno,
+   scrollbar sul bordo) e resta solo la colonna di lettura centrata */
+.pb.report{flex:none;overflow:visible;min-height:0;padding:0 2px;
+  max-width:80ch;margin:0 auto}
 .report-empty{height:100%;min-height:140px;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:4px;text-align:center;
   color:var(--dim);font-size:12px}
@@ -175,6 +178,11 @@ html[data-theme="light"] .btn.danger:hover{background:rgba(180,67,60,.07)}
   text-decoration:none;font-family:var(--mono);font-size:9.5px;
   transition:color .12s}
 .history .actions a:hover,.history .actions button:hover{color:var(--amber)}
+/* FIX 13: badge "completata con N avvisi" accanto allo stato in cronologia,
+   stesso testo del run-header; cliccabile = apri il run con il dettaglio */
+button.wbadge{appearance:none;background:transparent;font:inherit;letter-spacing:inherit;
+  cursor:pointer}
+button.wbadge:hover{background:var(--amber-soft)}
 
 /* ── statusbar ──────────────────────────────────────────────────────────── */
 .statusbar{flex:none;display:flex;flex-wrap:wrap;align-items:stretch;overflow:hidden;
@@ -183,6 +191,10 @@ html[data-theme="light"] .btn.danger:hover{background:rgba(180,67,60,.07)}
 .sbi{display:flex;align-items:center;gap:5px;padding:0 9px;height:24px;
   border-right:1px solid var(--line2);white-space:nowrap}
 .sbi b{color:var(--txt);font-weight:500}
+/* FIX 11: contatore claims estratti cliccabile -> vista Verifiche */
+.sbi-click{cursor:pointer;transition:background .12s}
+.sbi-click:hover{background:var(--hover)}
+.sbi-click b{color:var(--amber)}
 .sbi-grow{flex:1;justify-content:flex-end;border-right:0}
 .badge{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;
   padding:1px 7px;border-radius:3px;border:1px solid var(--line3);color:var(--dim);
@@ -301,14 +313,26 @@ li.cat-success .ev-ic{color:var(--gain)}
 
 /* ── report ─────────────────────────────────────────────────────────────── */
 /* B1-fix4: il report scrolla DENTRO il suo pannello (che ora ha altezza
-   determinata dalla colonna a viewport fisso), non serve un limite vh */
-.report{overflow-y:auto;min-height:0;flex:1;font-size:13px;line-height:1.6}
+   determinata dalla colonna a viewport fissi), non serve un limite vh */
+/* FIX 9: viewport di scorrimento separato dalla colonna di lettura:
+   #report-scroll scrolla (scrollbar al bordo pannello), #report e' la
+   colonna centrata ~80ch. Nessuna colonna riservata a pannelli chiusi. */
+.report-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:10px 12px;
+  scrollbar-gutter:stable}
+.report{min-height:0;font-size:13px;line-height:1.6}
 .report p{margin:6px 0}
 .report h1{font-size:19px;margin:12px 0 6px;letter-spacing:-.01em}
 .report h2{font-size:15px;margin:14px 0 6px}
 .report h3{font-size:13px;margin:10px 0 4px;color:var(--txt)}
-.report .li{margin:4px 0 4px 14px}
-.report .li::before{content:'-';color:var(--faint);margin-right:6px}
+/* FIX 10: elenchi markdown veri (semplici e annidati), blockquote markdown */
+.report ul,.report ol{margin:6px 0;padding-left:24px}
+.report ul{list-style:disc}
+.report ol{list-style:decimal}
+.report li{margin:3px 0}
+.report ul ul,.report ul ol,.report ol ul,.report ol ol{margin:2px 0}
+.report blockquote{margin:8px 0;padding:7px 12px;border-left:2px solid var(--amber-dk);
+  background:var(--panel2);color:var(--dim);border-radius:0 4px 4px 0}
+.report blockquote p{margin:0}
 .report code{background:var(--code);border:1px solid var(--line2);border-radius:3px;
   padding:1px 4px;font-family:var(--mono);font-size:11px}
 .report a{color:var(--amber);word-break:break-all;text-decoration:none}
@@ -339,6 +363,9 @@ html[data-theme="light"] button.citation:hover{color:#fffaf0}
 .stepper .sdot{width:6px;height:6px;border-radius:50%;background:var(--faint);opacity:.4;flex:none}
 .stepper .step.done{color:var(--gain)}
 .stepper .step.done .sdot{background:var(--gain);opacity:1}
+/* FIX 13: verifica conclusa CON AVVISI -> punto giallo, non verde */
+.stepper .step.done.warn{color:var(--warn)}
+.stepper .step.done.warn .sdot{background:var(--warn);opacity:1}
 .stepper .step.active{color:var(--amber);border-color:var(--amber-dk);
   background:var(--amber-soft)}
 .stepper .step.active .sdot{background:var(--amber);opacity:1;
@@ -366,14 +393,33 @@ html[data-theme="light"] button.citation:hover{color:#fffaf0}
 .coherence .cr{color:var(--faint)}
 
 /* ── riga statistiche verifica: striscia propria, niente sovrapposizioni ── */
+/* FIX 11-12: etichette esplicite, stessa colonna del report, chip cliccabili */
 .verify-stats{display:flex;flex-wrap:wrap;gap:4px 14px;padding:6px 12px;
-  border-bottom:1px solid var(--line);font-family:var(--mono);font-size:10.5px}
+  border-bottom:1px solid var(--line);font-family:var(--mono);font-size:10.5px;
+  width:100%;max-width:80ch;margin:0 auto}
 .verify-stats[hidden]{display:none}
 .verify-stats .vs{white-space:nowrap}
 .verify-stats .vs.ok{color:var(--gain)}
 .verify-stats .vs.fix{color:var(--amber)}
 .verify-stats .vs.rem{color:var(--faint)}
 .verify-stats .vs.bad{color:var(--loss)}
+.verify-stats .vs.cnt{color:var(--txt)}
+/* contatori cliccabili: aprono la vista Verifiche gia' filtrata */
+button.vs{appearance:none;background:transparent;border:1px solid transparent;
+  border-radius:3px;padding:0 2px;font:inherit;letter-spacing:inherit;cursor:pointer;
+  white-space:nowrap}
+button.vs:hover{border-color:var(--line3);background:var(--hover)}
+button.vs:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+
+/* ── filtro vista Verifiche (FIX 11: filtri per stato) ─────────────────── */
+.vf-bar{flex:none;display:flex;flex-wrap:wrap;gap:4px;padding:7px 10px 0}
+.vf-chip{appearance:none;background:var(--panel2);border:1px solid var(--line);
+  border-radius:4px;color:var(--dim);font-family:var(--mono);font-size:9.5px;
+  padding:2px 8px;cursor:pointer;white-space:nowrap}
+.vf-chip b{color:var(--txt);font-weight:500;margin-left:3px}
+.vf-chip:hover{border-color:var(--amber-dk);color:var(--amber)}
+.vf-chip.on{border-color:var(--amber);color:var(--amber);background:var(--amber-soft)}
+.vf-chip.on b{color:var(--amber)}
 
 /* ── filtro cronologia ──────────────────────────────────────────────── */
 .hist-search{display:flex;align-items:center;gap:6px;padding:6px 10px;
@@ -469,10 +515,15 @@ button.badge.clickable:hover{background:var(--amber-soft);border-color:var(--war
 .hbtn.on{color:var(--amber);border-color:var(--amber-dk)}
 
 /* ── pannello attività collassabile ─────────────────────────────────────── */
-#activity-panel.collapsed{flex:0 0 auto}
+/* FIX 8: collassato = SOLO la riga header ("Mostra attivita — N eventi"),
+   mai un rettangolo vuoto: min-height:0 annulla il min-height di .panel.grow */
+#activity-panel.collapsed{flex:0 0 auto;min-height:0}
 #activity-panel.collapsed .plan,#activity-panel.collapsed .activity{display:none}
 #activity-head{cursor:pointer}
 #activity-head:hover{background:var(--hover)}
+.act-chev{color:var(--faint);transition:transform .12s}
+#activity-panel.collapsed .act-chev{transform:rotate(-90deg)}
+#activity-panel.collapsed #activity-head .ttl{color:var(--amber)}
 
 /* ── tab Report / Fonti / Verifiche ─────────────────────────────────────── */
 .rtabs{display:flex;gap:2px;margin-left:6px}
@@ -532,26 +583,35 @@ button.badge.clickable:hover{background:var(--amber-soft);border-color:var(--war
 #warnings-panel .coherence-head .hbtn{margin-left:auto}
 
 /* ── indice del report ──────────────────────────────────────────────────── */
-.report-toc{flex:none;margin:8px 10px 0;padding:7px 10px;border:1px solid var(--line2);
-  border-radius:4px;background:var(--panel2)}
-.toc-ttl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;
-  color:var(--faint);margin-bottom:4px}
-.report-toc ul{list-style:none;margin:0;padding:0}
+/* FIX 14: TOC richiudibile (details), altezza non fissa, stessa colonna 80ch */
+.report-toc{flex:none;width:100%;max-width:80ch;margin:0 auto 8px;
+  border:1px solid var(--line2);border-radius:4px;background:var(--panel2)}
+.report-toc summary{list-style:none;cursor:pointer;user-select:none;
+  display:flex;align-items:center;gap:6px;padding:6px 10px;
+  font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--faint)}
+.report-toc summary::-webkit-details-marker{display:none}
+.report-toc summary::before{content:"▸";font-size:9px;color:var(--faint);
+  transition:transform .12s}
+.report-toc[open] summary::before{transform:rotate(90deg)}
+.report-toc summary:hover{color:var(--dim)}
+.report-toc ul{list-style:none;margin:0;padding:0 10px 8px}
 .report-toc li{line-height:1.55}
 .report-toc li.toc-h3{padding-left:12px}
 .report-toc li.toc-h4{padding-left:24px}
 .report-toc a{color:var(--dim);text-decoration:none;font-size:12px}
 .report-toc a:hover{color:var(--amber)}
 
-/* ── leggibilità report: sans 15.5px, 80ch, tabelle scrollabili ─────────── */
-.report{font-size:15.5px;line-height:1.6;max-width:80ch}
+/* ── leggibilità report: sans 15.5px, colonna 80ch centrata nel viewport ── */
+.report{font-size:15.5px;line-height:1.6}
 .report p{margin:7px 0}
 .report h1{font-size:21px;margin:14px 0 8px;letter-spacing:-.01em}
 .report h2{font-size:17.5px;margin:18px 0 8px;padding-bottom:4px;
   border-bottom:1px solid var(--line2)}
 .report h3{font-size:15.5px;margin:14px 0 5px;color:var(--txt)}
 .report h1,.report h2,.report h3{font-weight:600}
-.report .li{margin:4px 0 4px 16px}
+/* FIX 14: gli anchor-scroll non devono finire sotto le intestazioni del pannello */
+.report h1,.report h2,.report h3,.report h4{scroll-margin-top:10px}
 .table-wrap{overflow-x:auto;margin:8px 0;border:1px solid var(--line2);border-radius:4px}
 .report table{border-collapse:collapse;font-size:13.5px;min-width:100%}
 .report th,.report td{border:1px solid var(--line2);padding:4px 8px;text-align:left;
@@ -589,8 +649,9 @@ body.reading .col-left,body.reading .col-right,body.reading #tech-details{displa
   .col-center{width:100% !important;flex:none;overflow:visible;height:auto}
   .resizers{display:none}
   #activity-panel{min-height:180px;max-height:60vh}
+  #activity-panel.collapsed{min-height:0}
   #report-panel{min-height:320px}
-  #report{max-height:70vh}
+  #report-scroll{max-height:70vh}
   .rsearch-wrap{display:none}
   body.reading .col-left,body.reading .col-right{display:none}
 }
@@ -613,6 +674,7 @@ body.reading .col-left,body.reading .col-right,body.reading #tech-details{displa
   #verify-stats,#coherence-panel,#warnings-panel{display:none !important}
   #view-sources,#view-verifs{display:none !important}
   #view-report{display:block !important}
+  #report-scroll{display:block;overflow:visible;padding:0}
   .report-toc{display:none !important}
   #report{overflow:visible;max-width:none;max-height:none;font-size:12pt;color:#000}
   .report a{color:#000;text-decoration:underline}

@@ -45,6 +45,10 @@ const state = {
   reportView: "report",    // report | sources | verifs
   srcRows: null,           // righe vista fonti (con conteggi citazioni)
   lastCitationBtn: null,   // per Escape: focus all'ultimo bottone citazione
+  verifsFilter: null,      // FIX 11: filtro vista Verifiche {kind,value}
+  verifsData: null,        // report.json corrente (re-render con filtro)
+  reportScroll: new Map(), // FIX 9: runId -> scrollTop (ripristino solo stesso run)
+  lastReportRun: null,     // ultimo run renderizzato (aggiornamenti in streaming)
 };
 
 const $ = (id) => document.getElementById(id);
@@ -146,6 +150,10 @@ function openStream(runId) {
     "report_chunk", "verification_started",
     "claim_verified", "claim_corrected", "claim_removed", "claim_failed",
     "run_completed", "run_failed", "run_cancelled", "run_closed",
+    // FIX 15: report_final e' persistito e replayato dal backend ma non era
+    // in whitelist: il report finale (e la striscia verifiche) live arrivava
+    // solo dopo reload/apertura da cronologia
+    "report_final",
     // eventi nuovi lato backend
     "source_queued", "source_fetching", "source_reading", "usage_update",
     "source_duplicate", "source_reused", "cycle_contribution",
@@ -415,7 +423,14 @@ function handleEvent(ev) {
   if (type === "report_final" && p.markdown) {
     renderReport(p.markdown);  // verified text replaces the draft
     // riga statistiche verifica (P0-1 payload: claims/verified/corrected/removed/failed/uncovered)
-    if (p.verification) renderVerifyStats(p.verification);
+    if (p.verification) {
+      renderVerifyStats(p.verification);
+      // FIX 11: il contatore statusbar "claims estratti" deve mostrare gli
+      // estratti reali (29), non gli eventi verifica visti in streaming
+      if (p.verification.claims != null) state.counters.claims = p.verification.claims;
+      // FIX 13: verifica conclusa con avvisi -> punto giallo nello stepper
+      markVerificaDone((p.verification.failed || 0) > 0);
+    }
     const cb = $("coherence-btn");
     if (cb) cb.hidden = false;
     initReportViews();  // tab Fonti/Verifiche ora hanno dati reali
@@ -509,12 +524,11 @@ function updateReadingIndicator(type) {
   ind.hidden = state.reading <= 0;
 }
 
-/* a fine run il feed si riduce: mostra solo gli ultimi 12 eventi */
+/* a fine run il feed si riduce a UNA RIGA nell'header ("Mostra attivita — N
+   eventi"); nessun rettangolo vuoto e nessun evento cancellato: il click
+   riapre il corpo COMPLETO e il conteggio descrive cio' che si rivedra' */
 function collapseActivity() {
-  const list = $("activity");
-  while (list.children.length > 12) list.removeChild(list.lastChild);
-  const fc = $("feed-count");
-  if (fc) fc.textContent = `${list.children.length} eventi`;
+  setActivityCollapsed(true, false);
 }
 
 /* ============================== statusbar ============================== */
@@ -543,16 +557,163 @@ function resetStepper() {
 }
 
 /* ── riga statistiche verifica ───────────────────────────────────────── */
-function renderVerifyStats(v) {
+/* FIX 11-12: etichette che dicono COSA contano. Le categorie misurano cose
+   diverse e possono sovrapporsi: [support:X] = valutazione delle evidenze,
+   verdict = esito della verifica; NON sono parti di uno stesso totale e non
+   sono punteggi di verita'. Ogni numero cliccabile apre la vista Verifiche
+   gia' filtrata per quello stato. */
+function normText(s) {
+  return String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/* riepilogo completo dalle verifiche di report.json (fonte unica live/storico) */
+function summarizeVerifs(data) {
+  const verifs = data.verifications || [];
+  const byVerdict = {};
+  const support = { supported: 0, contradicted: 0, insufficient: 0, mixed: 0 };
+  for (const v of verifs) {
+    byVerdict[v.verdict] = (byVerdict[v.verdict] || 0) + 1;
+    const sup = parseSupport(v.reason).support;
+    if (sup) support[sup] += 1;
+  }
+  return {
+    claims: (data.claims || []).length,
+    total: verifs.length,
+    byVerdict,
+    support,
+    uncovered: 0,
+  };
+}
+
+function chipHtml(cls, n, label, title, filter) {
+  if (n == null) return "";
+  const inner = `${n} ${label}`;
+  if (!filter) {
+    return `<span class="vs ${cls}" title="${escapeHtml(title)}">${inner}</span>`;
+  }
+  return `<button type="button" class="vs ${cls}" data-filter="${escapeHtml(filter)}" ` +
+    `title="${escapeHtml(title)}">${inner}</button>`;
+}
+
+function renderVerifyStrip(sum) {
   const el = $("verify-stats");
-  if (!el || !v) return;
+  if (!el || !sum) return;
+  const sup = sum.support;
+  const byVerdict = sum.byVerdict || {};
+  const bits = [];
+  bits.push(chipHtml("cnt", sum.claims, "claims estratti",
+    "Frasi (claim) estratte dal report finale: e' da queste che nascono le verifiche",
+    "all"));
+  bits.push(chipHtml("cnt", sum.total, "verifiche eseguite",
+    "Verifiche registrate sul report (una per claim verificato)", "all"));
+  if (sup) {
+    bits.push(chipHtml("ok", sup.supported || 0, "supportate",
+      "Claim con evidenze a supporto [support:supported]", "support:supported"));
+    const unsup = (sup.contradicted || 0) + (sup.insufficient || 0) + (sup.mixed || 0);
+    bits.push(chipHtml("bad", unsup, "non supportate",
+      "Claim SENZA evidenze a supporto [support:X]: " +
+      `${sup.contradicted || 0} contraddette, ${sup.insufficient || 0} fonti insufficienti, ` +
+      `${sup.mixed || 0} contrastate`, "support:unsupported"));
+    if ((sup.contradicted || 0) > 0 || (sup.insufficient || 0) > 0 || (sup.mixed || 0) > 0) {
+      bits.push(chipHtml("bad", sup.contradicted || 0, "contraddette",
+        "Un'evidenza riferisce il contrario [support:contradicted]", "support:contradicted"));
+      bits.push(chipHtml("bad", sup.insufficient || 0, "fonti insufficienti",
+        "Le fonti trovate non bastano a confermarla [support:insufficient]", "support:insufficient"));
+      bits.push(chipHtml("bad", sup.mixed || 0, "contrastate",
+        "Le fonti sono in disaccordo tra loro [support:mixed]", "support:mixed"));
+    }
+  }
+  bits.push(chipHtml("fix", byVerdict.CORRECTED || 0, "corrette",
+    "Claim corretti dal verifier (verdict CORRECTED): il testo corretto sostituisce l'originale nel report",
+    "verdict:CORRECTED"));
+  bits.push(chipHtml("rem", byVerdict.REMOVED || 0, "rimosse",
+    "Claim rimossi dalla versione finale (verdict REMOVED): il motivo dell'esclusione e' indicato in ogni voce della vista Verifiche",
+    "verdict:REMOVED"));
+  bits.push(chipHtml("bad", byVerdict.FAILED || 0, "verifiche non conclusive",
+    "Verifica non conclusa per errori tecnici (fallback/errori LLM, verdict FAILED); non include le fonti insufficienti. Per ognuna la vista Verifiche indica se la frase e' ancora nel report o gia' gestita",
+    "verdict:FAILED"));
+  if ((byVerdict.WEAKENED || 0) > 0) {
+    bits.push(chipHtml("fix", byVerdict.WEAKENED, "indebolite",
+      "Claim indeboliti (verdict WEAKENED): lasciati nel report ma segnalati",
+      "verdict:WEAKENED"));
+  }
+  if (sum.uncovered) {
+    bits.push(chipHtml("bad", sum.uncovered, "frasi non coperte",
+      "Frasi fattuali non coperte da nessun claim verificato (controllo di copertura testo→claim)"));
+  }
+  el.innerHTML = bits.filter(Boolean).join("");
   el.hidden = false;
-  el.innerHTML =
-    `<span class="vs ok">&#10003; ${v.verified ?? 0} verificate</span>` +
-    `<span class="vs fix">&#9998; ${v.corrected ?? 0} corrette</span>` +
-    `<span class="vs rem">&#128465; ${v.removed ?? 0} rimosse</span>` +
-    ((v.failed ?? 0) ? `<span class="vs bad">&#9888; ${v.failed} fallite</span>` : "") +
-    ((v.uncovered ?? 0) ? `<span class="vs bad">&#9888; ${v.uncovered} non coperte</span>` : "");
+  el.querySelectorAll(".vs[data-filter]").forEach((b) =>
+    b.addEventListener("click", () => setVerifsFilter(b.dataset.filter)));
+  // FIX 12: run-header esplicito su cosa contiene il report
+  const rc = $("rh-claims");
+  if (rc) {
+    rc.hidden = !sum.claims;
+    rc.textContent = `claims estratti: ${sum.claims}`;
+  }
+}
+
+/* versione provvisoria dal payload report_final (report.json arriva a seguire
+   con il dettaglio [support:X] e rimpiazza la striscia con i dati completi) */
+function renderVerifyStats(v) {
+  if (!v) return;
+  renderVerifyStrip({
+    claims: v.claims ?? null,
+    total: (v.verified || 0) + (v.corrected || 0) + (v.removed || 0) + (v.failed || 0),
+    byVerdict: {
+      VERIFIED: v.verified || 0, CORRECTED: v.corrected || 0,
+      REMOVED: v.removed || 0, FAILED: v.failed || 0, WEAKENED: 0,
+    },
+    support: null,
+    uncovered: v.uncovered || 0,
+  });
+}
+
+/* FIX 13: fase Verifica conclusa CON AVVISI -> punto giallo invece del verde */
+function markVerificaDone(warn) {
+  const step = document.querySelector('#phase-stepper .step[data-phase="verifica"]');
+  if (!step) return;
+  step.classList.remove("active");
+  step.classList.add("done");
+  step.classList.toggle("warn", !!warn);
+}
+
+/* ── filtro vista Verifiche (FIX 11: ogni contatore apre qui gia' filtrato) ── */
+const VERIFS_FILTER_DEFS = [
+  { key: "all", label: "tutte" },
+  { key: "support:supported", label: "supportate" },
+  { key: "support:unsupported", label: "non supportate" },
+  { key: "support:contradicted", label: "contraddette" },
+  { key: "support:insufficient", label: "insufficienti" },
+  { key: "support:mixed", label: "contrastate" },
+  { key: "verdict:VERIFIED", label: "confermate" },
+  { key: "verdict:CORRECTED", label: "corrette" },
+  { key: "verdict:WEAKENED", label: "indebolite" },
+  { key: "verdict:REMOVED", label: "rimosse" },
+  { key: "verdict:FAILED", label: "non conclusive" },
+];
+function parseFilterKey(key) {
+  const [kind, value] = String(key || "all").split(":");
+  return { kind: value ? kind : "all", value: value || null };
+}
+function verifsMatch(v, f) {
+  if (!f || f.kind === "all") return true;
+  if (f.kind === "verdict") return v.verdict === f.value;
+  if (f.kind === "support") {
+    const { support } = parseSupport(v.reason);
+    if (f.value === "unsupported") return !!support && support !== "supported";
+    return support === f.value;
+  }
+  return true;
+}
+function setVerifsFilter(key) {
+  state.verifsFilter = parseFilterKey(key);
+  if (!state.verifsData) {
+    toast("Nessuna verifica disponibile: il report non e' ancora pronto.");
+    return;
+  }
+  setReportView("verifs");
+  renderVerifsView(state.verifsData);
 }
 
 /* ── pannello coerenza ───────────────────────────────────────────────── */
@@ -632,11 +793,13 @@ function finishRun(s) {
   stopTimer();
   setStatus(s);
   // B14: il marker "verifica in corso" della bozza non deve mai sopravvivere
-  // alla fine del run (run vecchi senza report_final lo lasciavano stampato)
+  // alla fine del run (run vecchi senza report_final lo lasciavano stampato).
+  // FIX 10: il marker ora e' RENDERIZZATO in corsivo (<em>), non asterischi.
   const rep = $("report");
   if (rep && rep.textContent.includes("verifica in corso")) {
-    rep.innerHTML = rep.innerHTML.replaceAll("*verifica in corso...*", "")
-                                 .replaceAll("*verifica in corso…*", "");
+    rep.querySelectorAll("em").forEach((em) => {
+      if (/^\s*verifica in corso(\.\.\.|…)?\s*$/i.test(em.textContent)) em.remove();
+    });
   }
   // a fine ricerca (solo run LIVE avviato qui) il Report va in primo piano:
   // il replay di un run storico non deve sovrascrivere la preferenza utente
@@ -677,16 +840,75 @@ function escapeHtml(s) {
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/* FIX 10: applica una trasformazione SOLO ai segmenti di testo HTML,
+   mai dentro i tag/attributi generati (<a href=...>, data-n=..., ecc.) */
+function mapTextSegs(html, fn) {
+  return html.split(/(<[^>]*>)/g).map((part) =>
+    (part.startsWith("<") && part.endsWith(">")) ? part : fn(part)).join("");
+}
+
+/* FIX 10: renderer inline completo. Ordine SICURO:
+   1) escape HTML  2) code span -> segnaposto (contenuto resta letterale)
+   3) link markdown [t](url) e URL nudi -> <a> con testo protetto da segnaposto
+   4) grassetto/corsivo (** * __ _) su soli segmenti di testo
+   5) citazioni [n] -> bottoni, per ULTIME e solo su testo (mai in attributi)
+   6) ripristino segnaposto */
 function renderInline(text) {
+  const stash = [];
+  const park = (html) => { stash.push(html); return `\u0000${stash.length - 1}\u0000`; };
   let s = escapeHtml(text);
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
-  /* accorpa marker adiacenti identici SOLO al render: [13] [13] -> [13] */
-  s = s.replace(/\[(\d+)\](?:\s*\[\1\])+/g, "[$1]");
-  s = s.replace(/\[(\d+)\]/g, '<button class="citation" data-n="$1">[$1]</button>');
-  s = s.replace(/(https?:\/\/[^\s<)]+)/g,
-    '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  /* 2) code span */
+  s = s.replace(/`([^`\n]+)`/g, (m, c) => park(`<code>${c}</code>`));
+  /* 3) link markdown: il testo del link non deve subire corsivi/citazioni */
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (m, t, u) => park(`<a href="${u}" target="_blank" rel="noopener">${t}</a>`));
+  /* 3b) URL nudi (solo segmenti di testo: mai dentro href gia' generato) */
+  s = mapTextSegs(s, (t) => t.replace(/(^|[\s(])(https?:\/\/[^\s<)"']+)/g,
+    (m, pre, url) => pre + park(`<a href="${url}" target="_blank" rel="noopener">${url}</a>`)));
+  /* 4) grassetto e corsivo (annidamento gestito dall'ordine *** -> ** -> *);
+     il grassetto ammette * singoli nel contenuto (es. **a *b* c**) */
+  s = mapTextSegs(s, (t) => t
+    .replace(/\*\*\*(\S(?:[\s\S]*?\S)?)\*\*\*/g, "<b><em>$1</em></b>")
+    .replace(/\*\*(\S(?:[\s\S]*?\S)?)\*\*/g, "<b>$1</b>")
+    .replace(/\*(\S(?:[^*\n]*\S)?)\*/g, "<em>$1</em>")
+    .replace(/(?<![\w\\])___(\S(?:[\s\S]*?\S)?)___(?!\w)/g, "<b><em>$1</em></b>")
+    .replace(/(?<![\w\\])__(\S(?:[\s\S]*?\S)?)__(?!\w)/g, "<b>$1</b>")
+    .replace(/(?<![\w\\])_(\S(?:[^_\n]*\S)?)_(?!\w)/g, "<em>$1</em>"));
+  /* 5) citazioni: accorpa adiacenti identici AL SOLO RENDER: [13] [13] -> [13],
+     poi bottone; solo su segmenti di testo (href/data-n mai toccati) */
+  s = mapTextSegs(s, (t) => t
+    .replace(/\[(\d+)\](?:\s*\[\1\])+/g, "[$1]")
+    .replace(/\[(\d+)\]/g, '<button class="citation" data-n="$1">[$1]</button>'));
+  /* 6) ripristino segnaposto (unico passaggio: gli stash non contengono
+     segnaposto) */
+  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => stash[Number(i)] ?? m);
   return s;
+}
+
+/* FIX 10: elenco markdown semplice/annidato -> <ul>/<ol> per livello,
+   profondita' normalizzata sul rango dell'indentazione (0/4 spazi = 2 livelli) */
+function renderList(items) {
+  const indents = [...new Set(items.map((it) => it.indent))].sort((a, b) => a - b);
+  const root = { children: [], ordered: items[0].ordered };
+  const stack = [{ depth: -1, node: root }];
+  for (const it of items) {
+    const node = { text: it.text, ordered: it.ordered, children: [] };
+    const depth = indents.indexOf(it.indent);
+    while (stack.length > 1 && stack[stack.length - 1].depth >= depth) stack.pop();
+    stack[stack.length - 1].node.children.push(node);
+    stack.push({ depth, node });
+  }
+  const build = (list) => {
+    const tag = list.ordered ? "ol" : "ul";
+    let html = `<${tag}>`;
+    for (const n of list.children) {
+      html += `<li>${renderInline(n.text)}`;
+      if (n.children.length) html += build(n);
+      html += "</li>";
+    }
+    return html + `</${tag}>`;
+  };
+  return build(root);
 }
 
 /* tabella markdown -> wrapper scrollabile orizzontale (non allarga la pagina) */
@@ -705,51 +927,96 @@ function renderMdTable(rows) {
   return html + "</table></div>";
 }
 
+/* FIX 10: rendering blocco per blocco con ordine sicuro; FIX 9: gestione
+   scroll — primo render di un run = sempre in cima ("successo [6]." era la
+   posizione scrollata male), aggiornamenti in streaming NON spostano lo
+   scroll se l'utente sta leggendo, ripristino solo per run gia' consultato */
 function renderReport(markdown) {
   state.reportMarkdown = markdown;
+  const sc = $("report-scroll");
+  const prevTop = sc ? sc.scrollTop : 0;
+  const isUpdate = !!state.lastReportRun && state.lastReportRun === state.runId;
   const out = [];
   const lines = String(markdown).split("\n");
-  for (let i = 0; i < lines.length; i++) {
+  let i = 0;
+  while (i < lines.length) {
     const t = lines[i].trim();
-    if (!t) { out.push('<div class="sp"></div>'); continue; }
+    if (!t) { out.push('<div class="sp"></div>'); i += 1; continue; }
     if (t.startsWith("|") && t.endsWith("|")) {
       const rows = [];
       while (i < lines.length && lines[i].trim().startsWith("|")) {
         rows.push(lines[i].trim()); i += 1;
       }
-      i -= 1;
       out.push(renderMdTable(rows));
       continue;
     }
-    const h = t.match(/^(#{1,3})\s+(.*)$/);
-    if (h) {
-      out.push(`<h${h[1].length + 1}>${renderInline(h[2])}</h${h[1].length + 1}>`);
-    } else if (/^[-*]\s+/.test(t) || /^\d+\.\s+/.test(t)) {
-      out.push(`<div class="li">${renderInline(t.replace(/^([-*]|\d+\.)\s+/, ""))}</div>`);
-    } else {
-      out.push(`<p>${renderInline(t)}</p>`);
+    if (/^>{1,}/.test(t)) {  // blockquote (anche senza spazio dopo >)
+      const buf = [];
+      while (i < lines.length && /^>{1,}/.test(lines[i].trim())) {
+        buf.push(lines[i].trim().replace(/^>{1,}[ \t]?/, "")); i += 1;
+      }
+      out.push(`<blockquote>${renderInline(buf.join(" "))}</blockquote>`);
+      continue;
     }
+    const li = t.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (li) {  // gruppo di voci consecutive (anche annidate)
+      const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        if (!m) break;
+        items.push({ indent: m[1].replace(/\t/g, "  ").length,
+                     ordered: /\d/.test(m[2]), text: m[3] });
+        i += 1;
+      }
+      out.push(renderList(items));
+      continue;
+    }
+    const h = t.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const lvl = Math.min(h[1].length + 1, 6);
+      out.push(`<h${lvl}>${renderInline(h[2])}</h${lvl}>`);
+      i += 1;
+      continue;
+    }
+    if (/^([-*_])\1{2,}$/.test(t)) { out.push("<hr>"); i += 1; continue; }
+    out.push(`<p>${renderInline(t)}</p>`);
+    i += 1;
   }
   $("report").innerHTML = out.join("");
   buildToc();
+  if (sc) {
+    if (isUpdate) {
+      // bozza in streaming / finale: lo scroll resta dove legge l'utente,
+      // in cima resta in cima
+      sc.scrollTop = prevTop > 2 ? Math.min(prevTop, sc.scrollHeight) : 0;
+    } else {
+      // primo render del run: in cima, a meno che il run sia gia' stato
+      // consultato in questa sessione (posizione utente salvata)
+      const saved = state.reportScroll.get(state.runId) || 0;
+      sc.scrollTop = saved > 2 ? saved : 0;
+      state.lastReportRun = state.runId;
+    }
+  }
 }
 
-/* indice delle sezioni: lista cliccabile dagli h2/h3/h4, solo se >= 3 titoli */
+/* indice delle sezioni: lista cliccabile dagli h2/h3/h4, solo se >= 3 titoli.
+   FIX 14: <details> richiudibile con altezza non fissa */
 function buildToc() {
   const rep = $("report"), toc = $("report-toc");
-  if (!rep || !toc) return;
+  const list = $("toc-list"), sum = $("toc-summary");
+  if (!rep || !toc || !list) return;
   const heads = Array.from(rep.querySelectorAll("h2, h3, h4"));
-  if (heads.length < 3) { toc.hidden = true; toc.innerHTML = ""; return; }
+  if (heads.length < 3) { toc.hidden = true; list.innerHTML = ""; return; }
   heads.forEach((h, i) => { if (!h.id) h.id = `sec-${i + 1}`; });
-  toc.innerHTML = '<div class="toc-ttl">indice</div><ul>' +
-    heads.map((h) => {
-      const lvl = h.tagName.toLowerCase();
-      return `<li class="toc-${lvl}"><a href="#${h.id}">${escapeHtml(h.textContent)}</a></li>`;
-    }).join("") + "</ul>";
+  list.innerHTML = heads.map((h) => {
+    const lvl = h.tagName.toLowerCase();
+    return `<li class="toc-${lvl}"><a href="#${h.id}">${escapeHtml(h.textContent)}</a></li>`;
+  }).join("");
+  if (sum) sum.textContent = `indice · ${heads.length} sezioni`;
   toc.hidden = false;
   const smooth = window.matchMedia &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
-  toc.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
+  list.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
     const t = document.getElementById(a.getAttribute("href").slice(1));
     if (t) t.scrollIntoView({ behavior: smooth, block: "start" });
@@ -869,14 +1136,10 @@ async function loadReportJson() {
     const cb = $("coherence-btn");
     if (cb && state.reportJson.report_markdown) cb.hidden = false;
     if (state.reportJson.verifications) {
-      const by = {};
-      for (const v of state.reportJson.verifications)
-        by[v.verdict] = (by[v.verdict] || 0) + 1;
-      renderVerifyStats({
-        verified: by.VERIFIED || 0, corrected: by.CORRECTED || 0,
-        removed: by.REMOVED || 0, failed: by.FAILED || 0,
-        uncovered: 0,
-      });
+      // FIX 11: fonte unica live/storico — stessa striscia con dettaglio
+      // [support:X]; i dati restano in cache per i filtri della vista Verifiche
+      state.verifsData = state.reportJson;
+      renderVerifyStrip(summarizeVerifs(state.reportJson));
     }
   } catch (e) {
     if (String(e.message).startsWith("404")) {
@@ -970,6 +1233,27 @@ async function refreshHistory() {
   for (const [id, li] of existing) {
     if (!seen.has(id)) li.remove();
   }
+  // FIX 13: "completata con N avvisi" accanto allo stato, STESSA fonte del
+  // run-header (report.json); il badge e' cliccabile come quello in header
+  const completed = runs.slice(0, 30).filter((r) => r.status === "completed");
+  runLimited(completed.map((r) => async () => {
+    const w = await histWarnings(r.id);
+    if (!w || !w.total) return;
+    const li = ul.querySelector(`li[data-run-id="${CSS.escape(r.id)}"]`);
+    const meta = li && li.querySelector(".meta");
+    if (!meta || li.querySelector(".wbadge")) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "badge completed-warnings wbadge";
+    b.textContent = `completata con ${w.total} avvisi`;
+    b.title = "Mostra il dettaglio degli avvisi di questa ricerca";
+    const st = meta.querySelector(".badge");
+    if (st) st.replaceWith(b); else meta.prepend(b);
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      loadRun(r.id, { openWarnings: true });
+    });
+  }), 4);
 }
 
 function wireHistoryItem(li, r) {
@@ -1038,7 +1322,15 @@ async function loadRun(runId, opts = {}) {
     listenEvents(runId); // replay + chiusura
     updateStatusbar();
     if (detail.report) initReportViews();
-    if (st === "completed" || st === "completed-warnings") refreshWarnings();
+    if (opts.openWarnings) {
+      // FIX 13: click sul badge avvisi della cronologia = apri il run E il
+      // dettaglio degli avvisi (come il badge cliccabile del run-header)
+      await refreshWarnings();
+      if (state.warnings && state.warnings.total > 0) renderWarningsPanel();
+      else toast("Nessun avviso registrato per questa ricerca.");
+    } else if (st === "completed" || st === "completed-warnings") {
+      refreshWarnings();
+    }
   } catch (e) {
     toast(`Errore caricamento: ${e.message}`);
     setStatus(state.activeRunId ? "running" : "idle");
@@ -1146,6 +1438,13 @@ function resetPanels() {
   state.dbStatus = null;
   state.loadedRun = null;
   state.srcRows = null;
+  // FIX 11/9: filtro verifiche e posizione di scroll ripartono puliti;
+  // reportScroll (posizioni per run consultati) resta in memoria di sessione
+  state.verifsFilter = null;
+  state.verifsData = null;
+  state.lastReportRun = null;
+  const rc = $("rh-claims");
+  if (rc) { rc.hidden = true; rc.textContent = ""; }
   setStopReason(null);
   // viste report: torna al Report, tab nascoste finché non ci sono dati reali
   const rs = $("report-search");
@@ -1279,12 +1578,17 @@ function setStopReason(code, finalStatus) {
 }
 
 /* ====================== collasso pannello Attività ====================== */
+/* FIX 8: collassato = la sola riga header "Mostra attivita — N eventi"
+   (chevron ruotato + titolo che lo dice); il conteggio resta quello reale
+   degli eventi visualizzabili e il click riapre il corpo completo */
 function setActivityCollapsed(collapsed, save) {
   const panel = $("activity-panel");
   if (!panel) return;
   panel.classList.toggle("collapsed", collapsed);
   const head = $("activity-head");
   if (head) head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  const ttl = $("activity-ttl");
+  if (ttl) ttl.textContent = collapsed ? "Mostra attivita" : "Attivita";
   if (save) localStorage.setItem("dr_activity", collapsed ? "1" : "0");
 }
 function applyActivityPref() {
@@ -1306,10 +1610,11 @@ function setReading(on, save = true) {
 
 /* ====================== avvisi consultabili ====================== */
 /* problemi del risultato: verifiche FAILED/WEAKENED (frase + motivo);
-   problemi operativi: fonti non lette (url + errore). Dati da report.json. */
-async function computeWarnings() {
-  const data = await loadReportJson();
-  if (!data || data.notFound) return null;
+   problemi operativi: fonti non lette (url + errore). Dati da report.json.
+   FIX 13: la stessa funzione alimenta il badge della cronologia, cosi'
+   cronologia e run-header mostrano SEMPRE lo stesso "con N avvisi". */
+function summarizeRunWarnings(data) {
+  if (!data || data.notFound) return { result: [], ops: [], total: 0 };
   const claimsById = new Map((data.claims || []).map((c) => [c.id, c]));
   const result = [], ops = [];
   for (const v of data.verifications || []) {
@@ -1330,6 +1635,36 @@ async function computeWarnings() {
     }
   }
   return { result, ops, total: result.length + ops.length };
+}
+
+async function computeWarnings() {
+  const data = await loadReportJson();
+  if (!data || data.notFound) return null;
+  return summarizeRunWarnings(data);
+}
+
+/* FIX 13: avvisi per run storico (cache per id; fetch report.json a bassa
+   concorrenza solo per i run completati visibili in lista) */
+const _histWarn = new Map();
+function histWarnings(runId) {
+  if (!_histWarn.has(runId)) {
+    _histWarn.set(runId, apiJson(`/api/runs/${runId}/report.json`)
+      .then((d) => summarizeRunWarnings(d))
+      .catch(() => null));
+  }
+  return _histWarn.get(runId);
+}
+
+/* esegue task asincroni con concorrenza limitata (coda di fetch) */
+async function runLimited(tasks, limit) {
+  const queue = tasks.slice();
+  const n = Math.max(1, Math.min(limit, queue.length));
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (queue.length) {
+      const t = queue.shift();
+      try { await t(); } catch { /* i singoli fallimenti non bloccano gli altri */ }
+    }
+  }));
 }
 
 async function refreshWarnings() {
@@ -1521,12 +1856,36 @@ function parseSupport(reason) {
 function renderVerifsView(data) {
   const box = $("view-verifs");
   if (!box) return;
+  state.verifsData = data;
   const claimsById = new Map((data.claims || []).map((c) => [c.id, c]));
   const evById = new Map((data.evidences || []).map((e) => [e.evidence_id, e]));
-  const parts = ['<div class="verif-legend mono">stati di supporto: ' +
+  // FIX 12 (FAILED): la frase e' ancora nel report finale o gia' gestita?
+  const md = normText(String(data.report_markdown || ""));
+  const inReport = (c) => {
+    const t = normText(c && c.text);
+    return t.length >= 12 && md.includes(t);
+  };
+  // conteggi per i chip di filtro
+  const counts = {};
+  for (const d of VERIFS_FILTER_DEFS) {
+    counts[d.key] = (data.verifications || [])
+      .filter((v) => verifsMatch(v, parseFilterKey(d.key))).length;
+  }
+  const f = state.verifsFilter || { kind: "all" };
+  const curKey = f.kind === "all" ? "all" : `${f.kind}:${f.value}`;
+  const rows = (data.verifications || []).filter((v) => verifsMatch(v, f));
+  const parts = ['<div class="vf-bar">' + VERIFS_FILTER_DEFS.map((d) => {
+    const on = d.key === curKey ? " on" : "";
+    return `<button type="button" class="vf-chip${on}" data-filter="${d.key}" ` +
+      `title="Filtra le verifiche per stato: ${d.label}">${d.label} <b>${counts[d.key] || 0}</b></button>`;
+  }).join("") + "</div>",
+    '<div class="verif-legend mono">stati di supporto: ' +
     Object.keys(SUPPORT_IT).map((k) => `<b>${k}</b> = ${SUPPORT_HELP[k]}`).join(" · ") +
     '</div><ul class="verif-list">'];
-  for (const v of data.verifications || []) {
+  if (!rows.length) {
+    parts.push('<li class="dim">Nessuna verifica per questo filtro.</li>');
+  }
+  for (const v of rows) {
     const c = claimsById.get(v.claim_id);
     const { support, rest } = parseSupport(v.reason);
     const n = c ? (c.final_citation_no ?? c.citation_no) : null;
@@ -1539,10 +1898,20 @@ function renderVerifsView(data) {
           `evidenze (${evs.length})</button>`
         : `<span class="cr mono" title="Quote dell'evidenza">“${escapeHtml(String(evs[0].quote || "").slice(0, 140))}”</span>`;
     }
+    // FIX 12: per le non conclusive, distingui frase ancora presente vs gestita
+    let presence = "";
+    if (v.verdict === "FAILED") {
+      const present = inReport(c);
+      presence = `<span class="badge neutral" title="${present
+        ? "La frase di questo claim è ancora presente nel report finale"
+        : "La frase di questo claim non è più nel report finale (già gestita dal verifier)"}">` +
+        `${present ? "frase ancora nel report" : "frase non più nel report"}</span>`;
+    }
     parts.push(`<li>` +
       `<div class="verif-head"><span class="verdict ${escapeHtml(v.verdict)}">` +
       `${escapeHtml(v.verdict)}</span>` +
       (support ? `<span class="sup sup-${support}" title="${SUPPORT_IT[support]}: ${SUPPORT_HELP[support]}">${SUPPORT_IT[support]}</span>` : "") +
+      presence +
       `</div>` +
       `<div class="verif-text">${escapeHtml((c && c.text) || "(claim rimosso dal report)")}</div>` +
       (rest ? `<div class="cr">${escapeHtml(rest.slice(0, 220))}</div>` : "") +
@@ -1551,6 +1920,8 @@ function renderVerifsView(data) {
   }
   parts.push("</ul>");
   box.innerHTML = parts.join("");
+  box.querySelectorAll(".vf-chip").forEach((b) =>
+    b.addEventListener("click", () => setVerifsFilter(b.dataset.filter)));
   box.querySelectorAll(".ev-link").forEach((b) => b.addEventListener("click", () => {
     openCitation(b.dataset.cit).catch((x) => toast(x.message));
   }));
@@ -1620,6 +1991,17 @@ function init() {
     setActivityCollapsed(!$("activity-panel").classList.contains("collapsed"), true));
   ahead.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); ahead.click(); }
+  });
+  // FIX 9: la posizione di scroll del report e' per-run (ripristino solo per
+  // run gia' consultati in questa sessione)
+  $("report-scroll").addEventListener("scroll", () => {
+    if (state.runId) state.reportScroll.set(state.runId, $("report-scroll").scrollTop);
+  }, { passive: true });
+  // FIX 11: contatore "claims estratti" cliccabile -> vista Verifiche
+  const claimsBox = $("sb-claims-box");
+  claimsBox.addEventListener("click", () => setVerifsFilter("all"));
+  claimsBox.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setVerifsFilter("all"); }
   });
   // header "Nuova ricerca" = reset visibile di modulo e pannelli
   const formReset = $("form-reset");

@@ -131,7 +131,8 @@
       <span class="sbi" title="Query di ricerca pianificate">query <b id="sb-queries" class="num">0</b></span>
       <span class="sbi" title="Fonti lette e accettate">fonti <b id="sb-sources" class="num">0</b></span>
       <span class="sbi" title="Evidenze estratte dalle fonti">evidenze <b id="sb-evidence" class="num">0</b></span>
-      <span class="sbi" title="Affermazioni del report verificate">claims <b id="sb-claims" class="num">0</b></span>
+      <span class="sbi sbi-click" id="sb-claims-box" role="button" tabindex="0"
+            title="Claim (frasi) estratti dal report finale — clic per aprire la vista Verifiche">claims estratti <b id="sb-claims" class="num">0</b></span>
       <span class="sbi sbi-grow"></span>
       <span class="sbi resizers">
         <button type="button" class="rbtn" data-col="left" title="Allarga/restringi colonna sinistra" aria-label="Ridimensiona colonna sinistra"><svg class="ic s12"><use href="#i-max"/></svg></button>
@@ -164,6 +165,7 @@
         <span id="rh-status" class="badge idle">in attesa</span>
         <span class="rh-m" title="Data e ora di avvio"><svg class="ic s12" aria-hidden="true"><use href="#i-clock"/></svg><span id="rh-date">—</span></span>
         <span class="rh-m" title="Durata della ricerca">durata <span id="rh-duration">—</span></span>
+        <span id="rh-claims" class="rh-m" hidden title="Claim (frasi) estratti dal report finale"></span>
         <span id="rh-stop" class="rh-m warn" hidden title="Ragione dell'arresto"></span>
       </div>
     </div>
@@ -187,8 +189,9 @@
     <section id="activity-panel" class="panel grow" aria-label="Attivita in tempo reale">
       <div class="ph" id="activity-head" role="button" tabindex="0" aria-expanded="true"
            aria-controls="activity" title="Clicca per nascondere/mostrare il feed attività">
+        <svg class="ic s12 act-chev" aria-hidden="true"><use href="#i-chev-d"/></svg>
         <svg class="ic"><use href="#i-activity"/></svg>
-        <span class="ttl">Attivita</span>
+        <span class="ttl" id="activity-ttl">Attivita</span>
         <span class="acts">
           <span id="reading-indicator" class="reading-ind" hidden>
             <svg class="ic s12 spin"><use href="#i-loader"/></svg>
@@ -251,7 +254,7 @@
             <svg class="ic s12"><use href="#i-printer"/></svg>
           </button>
           <button id="coherence-btn" class="hbtn wide" type="button" hidden
-                  title="Controllo anti-baggianate: numeri, URL e frasi supportate dalle fonti">
+                  title="Controllo di coerenza: verifica che i numeri, gli URL e le frasi del report siano supportati dalle evidenze raccolte (non è una certificazione generale del contenuto)">
             <svg class="ic s12"><use href="#i-check"/></svg>coerenza</button>
         </span>
       </div>
@@ -259,12 +262,19 @@
       <div id="coherence-panel" class="coherence" hidden></div>
       <div id="warnings-panel" class="coherence c-warn" hidden></div>
       <div id="view-report" class="rview">
-        <nav id="report-toc" class="report-toc" hidden aria-label="Indice del report"></nav>
-        <div id="report" class="pb report">
-          <div class="report-empty">
-            <svg class="ic s24"><use href="#i-file"/></svg>
-            <p>Il report apparira qui a fine ricerca,</p>
-            <p class="dim">costruito solo sulle evidenze verificate.</p>
+        <!-- FIX 9: larghezza di lettura (80ch, centrata) SEPARATA dal viewport di
+             scorrimento: scrolla #report-scroll, la scrollbar resta sul bordo -->
+        <details id="report-toc" class="report-toc" hidden aria-label="Indice del report">
+          <summary id="toc-summary">indice</summary>
+          <ul id="toc-list"></ul>
+        </details>
+        <div id="report-scroll" class="report-scroll">
+          <div id="report" class="pb report">
+            <div class="report-empty">
+              <svg class="ic s24"><use href="#i-file"/></svg>
+              <p>Il report apparira qui a fine ricerca,</p>
+              <p class="dim">costruito solo sulle evidenze verificate.</p>
+            </div>
           </div>
         </div>
       </div>
