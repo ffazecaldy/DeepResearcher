@@ -15,10 +15,45 @@ log = logging.getLogger(__name__)
 _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 _VALID_VERDICTS = {"VERIFIED", "WEAKENED", "CORRECTED", "REMOVED", "FAILED"}
 _VALID_SUPPORT = {"supported", "contradicted", "insufficient", "mixed"}
+# Tassonomia fine delle cause (esiti insufficienti / non conclusivi): arriva
+# nel verdict_reason come [cause:Y] DOPO il prefisso [support:X] — il prefisso
+# resta primo e con sintassi invariata (l'orchestrator lo consuma con regex).
+_VALID_CAUSES = {
+    "no_relevant_evidence",   # nessuna evidenza pertinente recuperata
+    "evidence_insufficient",  # pertinente ma non sufficiente a decidere
+    "doc_missing",            # documento non acquisito o illeggibile
+    "truncated",              # testo troncato o estrazione incompleta
+    "overstated",             # affermazione piu' forte della fonte
+    "contradiction",          # contraddizione tra evidenze
+    "technical_error",        # timeout, rate limit, errore API
+    "invalid_output",         # output del verificatore non valido
+}
 _SUPPORT_REASON = "evidenza contraddice"
+# Errore tecnico / output non valido: il claim NON e' "falso", e' NON
+# verificato. Il motivo dice sempre "verifica non conclusa" per non far
+# passare un problema di pipeline per un esito di merito.
+_NON_CONCLUSIVE = "verifica non conclusa"
+# Istruzione di seconda verifica quando il template dedicato non esiste nel
+# verifier.txt in uso (prompts minimali dei test): la formulazione corretta
+# viene riverificata da sola contro le stesse evidenze.
+_RECHECK_INSTR = (
+    "\n\nSECOND VERIFICATION - CORRECTED FORMULATION ONLY.\n"
+    "The original claim was already rewritten as:\n"
+    "\"{corrected_text}\"\n"
+    "Verify ONLY this corrected formulation against the SAME evidence.\n"
+    "- verdict VERIFIED only if the corrected formulation is directly and "
+    "fully supported by the evidence;\n"
+    "- otherwise WEAKENED (or FAILED if verification cannot be performed): "
+    "a vaguer sentence is not automatically supported.\n"
+    "Respond with the same JSON shape (corrected_text: null)."
+)
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 _CITE_TOKEN = re.compile(r"\[\d+\]")
 _TRAILING_PUNCT = re.compile(r"[.!?…]+")
+
+
+class _InvalidOutputError(ValueError):
+    """Output del verifier LLM non utilizzabile (JSON o verdict invalido)."""
 
 
 def _claim_parts(claim_text: str) -> tuple[str, str]:
@@ -150,6 +185,29 @@ def _extract_json_object(text: str) -> dict:
     raise ValueError("unbalanced JSON object")
 
 
+def _default_cause(support: str, verdict: str,
+                   ctx: str | None) -> str | None:
+    """Causa deterministica quando l'LLM non ne fornisce una valida.
+
+    Un esito insufficiente con contesto rotto (documento mancante o quote non
+    nel sorgente) e' prima di tutto un problema di contesto; per gli esiti di
+    merito (contraddetto/misto) la causa e' il merito, il contesto dopo.
+    """
+    if support == "insufficient":
+        if ctx in ("doc_missing", "truncated"):
+            return ctx
+        return "evidence_insufficient"
+    if verdict == "REMOVED":
+        return "no_relevant_evidence"
+    if support in ("mixed", "contradicted"):
+        return "contradiction"
+    if ctx in ("doc_missing", "truncated"):
+        return ctx
+    if verdict in ("WEAKENED", "CORRECTED"):
+        return "overstated"
+    return None  # esito pulito (VERIFIED+supported): nessuna causa da aggiungere
+
+
 class Verifier:
     """Checks every claim against its cited evidence.
 
@@ -160,6 +218,20 @@ class Verifier:
     Consumers must parse the prefix, never free text. Default when the LLM
     omits it: "insufficient". support=contradicted on a VERIFIED claim
     degrades the verdict to WEAKENED (evidence outweighs the model's ok).
+
+    Cause taxonomy: quando l'esito non e' pulito, il verdict_reason porta
+    anche "[cause:Y]" SUBITO DOPO il prefisso [support:X], con Y nella
+    tassonomia _VALID_CAUSES (dal campo "cause" della risposta LLM, altrimenti
+    determinato da _default_cause). Gli errori tecnici (timeout, rate limit,
+    errori API, output non valido) producono FAILED con causa technical_error
+    o invalid_output e motivo "verifica non conclusa": MAI un esito di merito.
+
+    Second verification: un CORRECTED con corrected_text non e' accettato
+    cosi' com'e' — la SOLA formulazione corretta viene riverificata una volta
+    contro le stesse evidenze; se non e' supportata anche lei, il claim
+    degrada a WEAKENED (rendere piu' vaga una frase non la rende supportata).
+    Se la seconda verifica non e' eseguibile (errore tecnico) resta valido il
+    CORRECTED della prima verifica.
     """
     def __init__(self, llm, prompts_dir: Path | None = None,
                  max_concurrency: int = 3):
@@ -167,131 +239,285 @@ class Verifier:
         self._prompts_dir = prompts_dir if prompts_dir is not None else _PROMPTS_DIR
         self._sem = asyncio.Semaphore(max(1, max_concurrency))
 
-    def _load(self) -> tuple[str, str]:
+    def _load(self) -> tuple[str, str, str | None]:
         raw = (self._prompts_dir / "verifier.txt").read_text(encoding="utf-8")
         if "---SYSTEM---" not in raw:
             raise RuntimeError("verifier.txt missing ---SYSTEM--- marker")
-        system, user = raw.split("---SYSTEM---", 1)
-        return system.strip(), user.strip()
+        system, rest = raw.split("---SYSTEM---", 1)
+        recheck: str | None = None
+        if "---RECHECK---" in rest:
+            rest, recheck = rest.split("---RECHECK---", 1)
+            recheck = recheck.strip() or None
+        return system.strip(), rest.strip(), recheck
 
-    def _unsupported_numbers(self, claim: ReportClaim,
-                             ev_map: dict[str, Evidence]) -> set[str]:
-        """Numbers in the claim not present in the cited evidence texts.
-        Token-boundary aware; evidence text = quote + generated summary
-        (both: the summary can paraphrase numbers absent from the quote)."""
-        quoted = " \n".join(
-            (ev_map[eid].quote + " \n" + ev_map[eid].claim)
-            for eid in claim.evidence_ids if eid in ev_map
-        ).lower()
-        quoted_tokens = _num_tokens(quoted)
-        return {n for n in _num_tokens(claim.text) if n not in quoted_tokens}
-
-    async def _llm_verdict(self, system_tpl: str, user_tpl: str,
-                           question: str, claim: ReportClaim,
-                           ev_map: dict[str, Evidence]
-                           ) -> tuple[Verdict, str, str | None, str]:
-        ev_json = json.dumps(
+    @staticmethod
+    def _evidence_json(claim: ReportClaim,
+                       ev_map: dict[str, Evidence]) -> str:
+        return json.dumps(
             [{"evidence_id": eid, "claim": ev_map[eid].claim,
               "quote": ev_map[eid].quote[:300]}
              for eid in claim.evidence_ids if eid in ev_map],
             ensure_ascii=False)
+
+    def _unsupported_numbers(self, text: str, evidence_ids: list[str],
+                             ev_map: dict[str, Evidence]) -> set[str]:
+        """Numbers in `text` not present in the cited evidence texts.
+        Token-boundary aware; evidence text = quote + generated summary
+        (both: the summary can paraphrase numbers absent from the quote)."""
+        quoted = " \n".join(
+            (ev_map[eid].quote + " \n" + ev_map[eid].claim)
+            for eid in evidence_ids if eid in ev_map
+        ).lower()
+        quoted_tokens = _num_tokens(quoted)
+        return {n for n in _num_tokens(text) if n not in quoted_tokens}
+
+    async def _llm_verdict(self, system_tpl: str, user_tpl: str,
+                           question: str, claim: ReportClaim,
+                           ev_map: dict[str, Evidence]
+                           ) -> tuple[Verdict, str, str | None, str, str | None]:
+        ev_json = self._evidence_json(claim, ev_map)
         user = user_tpl.format(question=question, claim=claim.text,
                                evidence_json=ev_json)
         raw = await self._llm.complete(system_tpl, user, force_json=True)
-        data = _extract_json_object(raw)
-        verdict = str(data.get("verdict", "")).upper()
-        if verdict not in _VALID_VERDICTS:
-            raise ValueError(f"invalid verdict: {verdict!r}")
+        try:
+            data = _extract_json_object(raw)
+            verdict = str(data.get("verdict", "")).upper()
+            if verdict not in _VALID_VERDICTS:
+                raise ValueError(f"invalid verdict: {verdict!r}")
+        except ValueError as exc:
+            raise _InvalidOutputError(str(exc)) from exc
         # support state (explicit verification states): default "insufficient"
         # when absent or invalid — never fail a whole verification for it.
         support = str(data.get("support", "insufficient")).strip().lower()
         if support not in _VALID_SUPPORT:
             log.debug("verifier: invalid support %r -> insufficient", support)
             support = "insufficient"
+        # cause dalla tassonomia: assente/invalida -> None (la determina poi
+        # _default_cause); mai fallire la verifica per un campo diagnostico.
+        cause = str(data.get("cause") or "").strip().lower()
+        if cause not in _VALID_CAUSES:
+            cause = None
         reason = str(data.get("reason", ""))
         corrected = data.get("corrected_text")
         corrected = str(corrected).strip() if corrected else None
-        return verdict, reason, corrected, support  # type: ignore[return-value]
+        return verdict, reason, corrected, support, cause  # type: ignore[return-value]
+
+    async def _recheck_corrected(
+            self, system_tpl: str, user_tpl: str, recheck_tpl: str | None,
+            question: str, claim: ReportClaim, corrected: str,
+            ev_map: dict[str, Evidence]
+            ) -> tuple[str, str, str, str | None] | None:
+        """Seconda verifica della SOLA formulazione corretta contro le stesse
+        evidenze. Ritorna (verdict, support, reason, cause), oppure None se la
+        seconda verifica non e' eseguibile (errore tecnico): in quel caso
+        resta valido il verdict CORRECTED della prima verifica — non si
+        degrada senza un esito."""
+        ev_json = self._evidence_json(claim, ev_map)
+        if recheck_tpl:
+            try:
+                user = recheck_tpl.format(
+                    question=question, claim=claim.text,
+                    corrected_text=corrected, evidence_json=ev_json)
+            except (KeyError, IndexError, ValueError):
+                user = (f"{claim.text}\n\n"
+                        + _RECHECK_INSTR.format(corrected_text=corrected)
+                        + f"\n\nEvidence (JSON):\n{ev_json}")
+        else:
+            user = (user_tpl.format(question=question, claim=claim.text,
+                                    evidence_json=ev_json)
+                    + "\n\n" + _RECHECK_INSTR.format(corrected_text=corrected))
+        try:
+            raw = await self._llm.complete(system_tpl, user, force_json=True)
+            data = _extract_json_object(raw)
+        except Exception as exc:
+            log.warning("verifier: seconda verifica della formulazione "
+                        "corretta non riuscita su %s: %s (mantengo il "
+                        "verdict CORRECTED della prima verifica)",
+                        claim.claim_id, exc)
+            return None
+        r_verdict = str(data.get("verdict", "")).upper()
+        r_support = str(data.get("support", "insufficient")).strip().lower()
+        if r_support not in _VALID_SUPPORT:
+            r_support = "insufficient"
+        r_cause = str(data.get("cause") or "").strip().lower()
+        if r_cause not in _VALID_CAUSES:
+            r_cause = None
+        r_reason = str(data.get("reason", ""))
+        return r_verdict, r_support, r_reason, r_cause
 
     async def verify(self, question: str, draft: DraftReport,
                      ev_map: dict[str, Evidence],
                      sources: dict[str, FetchedDocument]) -> VerifiedReport:
-        system_tpl, user_tpl = self._load()
+        system_tpl, user_tpl, recheck_tpl = self._load()
         markdown = draft.markdown
         support_counts = {s: 0 for s in sorted(_VALID_SUPPORT)}
+        ctx_cache: dict[str, str] = {}   # evidence_id -> stato contesto
+        norm_docs: dict[str, str] = {}   # source_id -> testo normalizzato
+
+        def context_status(eid: str, claim_id: str) -> str:
+            """Diagnosi del contesto passato al prompt: la quote dell'evidenza
+            DEVE trovarsi nel testo del documento sorgente. Se non c'e', il
+            contesto e' sbagliato o l'estrazione incompleta -> warning con
+            evidence_id, diagnosticabile dopo (falsi negativi nascosti)."""
+            st = ctx_cache.get(eid)
+            if st is not None:
+                return st
+            ev = ev_map[eid]
+            doc = sources.get(ev.source_id)
+            if doc is None or not (doc.text or "").strip():
+                st = "doc_missing"
+            else:
+                nd = norm_docs.get(ev.source_id)
+                if nd is None:
+                    nd = norm_docs[ev.source_id] = _norm_md(doc.text)
+                st = "ok" if _norm_md(ev.quote) in nd else "truncated"
+            ctx_cache[eid] = st
+            if st != "ok":
+                log.warning(
+                    "verifier: quote dell'evidenza %s non presente nel "
+                    "documento sorgente %s (%s): contesto sbagliato o "
+                    "estrazione incompleta (claim %s)",
+                    eid, ev.source_id, st, claim_id)
+            return st
+
         async def one(claim: ReportClaim) -> ReportClaim:
             nonlocal markdown
             if not claim.evidence_ids or any(e not in ev_map for e in claim.evidence_ids):
-                claim.verdict, claim.verdict_reason = "REMOVED", "no valid evidence"
+                claim.verdict, claim.verdict_reason = (
+                    "REMOVED",
+                    "[support:insufficient] [cause:no_relevant_evidence] "
+                    "nessuna evidenza valida recuperata per il claim")
                 new_md = _remove_claim(markdown, claim.text)
                 if new_md is not None:
                     markdown = new_md
                 return claim
-            bad_numbers = self._unsupported_numbers(claim, ev_map)
+            bad_numbers = self._unsupported_numbers(
+                claim.text, claim.evidence_ids, ev_map)
             async with self._sem:  # bounded concurrency: providers rate-limit bursts
                 try:
-                    verdict, reason, corrected, support = await self._llm_verdict(
+                    verdict, reason, corrected, support, cause = await self._llm_verdict(
                         system_tpl, user_tpl, question, claim, ev_map)
+                except _InvalidOutputError as exc:
+                    # output non valido: NON e' un esito di merito sul claim
+                    log.warning("verifier: output non valido su %s: %s",
+                                claim.claim_id, exc)
+                    claim.verdict, claim.verdict_reason = (
+                        "FAILED",
+                        f"[support:insufficient] [cause:invalid_output] "
+                        f"{_NON_CONCLUSIVE}: output del verifier non "
+                        f"valido ({exc})")
+                    return claim
                 except Exception as exc:
+                    # timeout / rate limit / errore API: il claim NON e' falso
                     log.warning("verifier: LLM check failed on %s: %s",
                                 claim.claim_id, exc)
                     claim.verdict, claim.verdict_reason = (
-                        "FAILED", f"verification error: {exc}")
+                        "FAILED",
+                        f"[support:insufficient] [cause:technical_error] "
+                        f"{_NON_CONCLUSIVE}: errore tecnico ({exc})")
                     return claim
-            # corrected_text vuoto con CORRECTED -> retry esplicito (B2)
-            if verdict == "CORRECTED" and not (corrected or "").strip():
-                for _retry in range(2):
-                    try:
-                        verdict, reason, corrected, support = await self._llm_verdict(
-                            system_tpl, user_tpl, question, claim, ev_map)
-                        if (corrected or "").strip():
-                            break
-                    except Exception as exc:
-                        log.warning("verifier: retry %s su %s: %s",
-                                    _retry + 1, claim.claim_id, exc)
-                        await asyncio.sleep(1)
-            if verdict == "CORRECTED" and not (corrected or "").strip():
-                # il modello non ha prodotto il testo corretto nemmeno dopo i
-                # retry: NON e' una verifica riuscita -> visibile come failed
-                verdict, reason = "FAILED", (
-                    "il verifier ha richiesto una correzione ma il testo "
-                    "corretto non e' stato prodotto (corrected_text vuoto)")
-            if bad_numbers and verdict == "VERIFIED":
-                verdict = "WEAKENED"
-                reason = (f"numeric values {sorted(bad_numbers)} not present in "
-                          f"quoted evidence; " + reason)
-            if support == "contradicted" and verdict == "VERIFIED":
-                # lo stato di verifica esplicito prevale: l'evidenza nega la
-                # affermazione, un VERIFIED non e' credibile -> WEAKENED
-                verdict, reason = "WEAKENED", _SUPPORT_REASON
-            # convenzione [support:X]: prefisso strutturato su verdict_reason
-            # (vedi docstring di Verifier; models.py e' congelato)
-            claim.verdict, claim.verdict_reason = (
-                verdict, f"[support:{support}] {reason}".strip())
-            support_counts[support] += 1
-            if verdict == "CORRECTED" and corrected:
-                new_md = _replace_claim(markdown, claim.text, corrected)
-                if new_md is None and _fuzzy_find(markdown, claim.text):
-                    # fallback normalizzato: sostituisco il frammento trovato
-                    frag = _fuzzy_find(markdown, claim.text)
-                    new_md = _replace_claim(markdown, frag, corrected)
-                if new_md is not None:
-                    markdown = new_md
-                    claim.corrected_text = corrected
-                else:
-                    # B2: MAI silenzio -> frase marcata NON VERIFICATA nel report
-                    claim.verdict = "FAILED"
-                    claim.verdict_reason = (
-                        "frase del claim non ritrovata nel markdown "
-                        "(nemmeno con matching normalizzato): citazione "
-                        "segnalata come non verificata")
-                    markdown = markdown.replace(claim.text,
-                        claim.text + " ⚠ *non verificata*", 1) \
-                        if claim.text in markdown else markdown
-            elif verdict == "REMOVED":
-                new_md = _remove_claim(markdown, claim.text)
-                if new_md is not None:
-                    markdown = new_md
+                # corrected_text vuoto con CORRECTED -> retry esplicito (B2)
+                if verdict == "CORRECTED" and not (corrected or "").strip():
+                    for _retry in range(2):
+                        try:
+                            (verdict, reason, corrected, support,
+                             cause) = await self._llm_verdict(
+                                system_tpl, user_tpl, question, claim, ev_map)
+                            if (corrected or "").strip():
+                                break
+                        except Exception as exc:
+                            log.warning("verifier: retry %s su %s: %s",
+                                        _retry + 1, claim.claim_id, exc)
+                            await asyncio.sleep(1)
+                if verdict == "CORRECTED" and not (corrected or "").strip():
+                    # il modello non ha prodotto il testo corretto nemmeno dopo
+                    # i retry: NON e' una verifica riuscita -> non conclusiva
+                    verdict, cause = "FAILED", "invalid_output"
+                    reason = (
+                        f"{_NON_CONCLUSIVE}: il verifier ha richiesto una "
+                        "correzione ma il testo corretto non e' stato "
+                        "prodotto (corrected_text vuoto)")
+                # -- seconda verifica della formulazione corretta: CORRECTED
+                # rende la frase piu' cauta, non piu' vera. La SOLA
+                # formulazione corretta viene riverificata UNA volta sulle
+                # stesse evidenze; se non e' supportata anche lei -> WEAKENED.
+                if verdict == "CORRECTED" and (corrected or "").strip():
+                    rechecked = await self._recheck_corrected(
+                        system_tpl, user_tpl, recheck_tpl, question, claim,
+                        corrected, ev_map)
+                    if rechecked is not None:
+                        r_verdict, r_support, r_reason, r_cause = rechecked
+                        bad_corr = self._unsupported_numbers(
+                            corrected, claim.evidence_ids, ev_map)
+                        if (r_verdict == "VERIFIED" and r_support == "supported"
+                                and not bad_corr):
+                            cause = cause or _default_cause(support, verdict, None)
+                            reason += (" (formulazione corretta confermata "
+                                       "dalla seconda verifica)")
+                        else:
+                            verdict, support = "WEAKENED", r_support
+                            corrected = None  # nessuna sostituzione nel markdown
+                            detail = "; ".join(x for x in (
+                                f"seconda verifica: {r_reason}" if r_reason else "",
+                                (f"valori {sorted(bad_corr)} non presenti "
+                                 "nelle evidenze") if bad_corr else "",
+                            ) if x)
+                            reason = ("anche la formulazione corretta non e' "
+                                      "supportata dalle evidenze (seconda "
+                                      "verifica)"
+                                      + (f": {detail}" if detail else ""))
+                            cause = r_cause or _default_cause(
+                                support, "WEAKENED", None)
+                if bad_numbers and verdict == "VERIFIED":
+                    verdict = "WEAKENED"
+                    reason = (f"numeric values {sorted(bad_numbers)} not present in "
+                              f"quoted evidence; " + reason)
+                    cause = cause or _default_cause(support, verdict, None)
+                if support == "contradicted" and verdict == "VERIFIED":
+                    # lo stato di verifica esplicito prevale: l'evidenza nega la
+                    # affermazione, un VERIFIED non e' credibile -> WEAKENED
+                    verdict, reason = "WEAKENED", _SUPPORT_REASON
+                    cause = cause or _default_cause(support, verdict, None)
+                # diagnosi contesto (warning su quote non nel sorgente) + causa
+                # per gli esiti non puliti
+                ctx = "ok"
+                for eid in claim.evidence_ids:
+                    st = context_status(eid, claim.claim_id)
+                    if st != "ok" and ctx == "ok":
+                        ctx = st
+                cause = cause or _default_cause(support, verdict, ctx)
+                # convenzione [support:X] + tassonomia [cause:Y] DOPO il
+                # prefisso (vedi docstring di Verifier; models.py e' congelato)
+                cause_seg = f"[cause:{cause}] " if cause else ""
+                claim.verdict, claim.verdict_reason = (
+                    verdict, f"[support:{support}] {cause_seg}{reason}".strip())
+                support_counts[support] += 1
+                if verdict == "CORRECTED" and corrected:
+                    new_md = _replace_claim(markdown, claim.text, corrected)
+                    if new_md is None and _fuzzy_find(markdown, claim.text):
+                        # fallback normalizzato: sostituisco il frammento trovato
+                        frag = _fuzzy_find(markdown, claim.text)
+                        new_md = _replace_claim(markdown, frag, corrected)
+                    if new_md is not None:
+                        markdown = new_md
+                        claim.corrected_text = corrected
+                    else:
+                        # B2: MAI silenzio -> frase marcata NON VERIFICATA nel
+                        # report; il claim resta dichiarato non conclusivo
+                        claim.verdict = "FAILED"
+                        claim.verdict_reason = (
+                            f"[support:{support}] [cause:technical_error] "
+                            f"{_NON_CONCLUSIVE}: frase del claim non "
+                            "ritrovata nel markdown (nemmeno con matching "
+                            "normalizzato): citazione segnalata come non "
+                            "verificata")
+                        markdown = markdown.replace(claim.text,
+                            claim.text + " ⚠ *non verificata*", 1) \
+                            if claim.text in markdown else markdown
+                elif verdict == "REMOVED":
+                    new_md = _remove_claim(markdown, claim.text)
+                    if new_md is not None:
+                        markdown = new_md
             return claim
 
         claims = list(await asyncio.gather(*(one(c) for c in draft.claims)))

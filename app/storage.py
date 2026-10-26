@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -337,3 +338,166 @@ class Storage:
     def usage_for_run(self, run_id: str) -> dict[str, Any] | None:
         rows = self._query("SELECT * FROM usage WHERE run_id=?", (run_id,))
         return rows[0] if rows else None
+
+    # ---------- interpretable coverage metrics ----------
+    _SUPPORT_RE = re.compile(r"\[support:(supported|contradicted|insufficient|mixed)\]")
+    _FONTI_NUM_RE = re.compile(r"^(\d+)\.\s", re.MULTILINE)
+    _CITE_RE = re.compile(r"\[(\d+)\]")
+
+    def metrics_for_run(self, run_id: str) -> dict[str, Any]:
+        """Metriche di copertura interpretabili per un run, con numeratore e
+        denominatore espliciti dove hanno senso.
+
+        - subquestion_coverage: piano vs ultimo gap status SALVATO
+          (cycle_registry.gap_status; fallback: evento gap_detected.status)
+        - claim_support: da verifications (verdict + prefisso [support:X] in
+          reason); i claim senza prefisso contano come not_conclusive
+        - citation_correctness: marker [n] nel markdown salvato e quanti hanno
+          una destinazione nella bibliografia "## Fonti"
+        - reading_yield: fonti acquisite (dedup per content_hash) / leggibili /
+          produttrici di evidenze
+        - cycle_contribution: lista dei contributi per ciclo (eventi salvati)
+        """
+        return {
+            "run_id": run_id,
+            "subquestion_coverage": self._coverage_metrics(run_id),
+            "claim_support": self._claim_support_metrics(run_id),
+            "citation_correctness": self._citation_metrics(run_id),
+            "reading_yield": self._reading_yield_metrics(run_id),
+            "cycle_contribution": self._cycle_contribution_list(run_id),
+        }
+
+    def _coverage_metrics(self, run_id: str) -> dict[str, Any]:
+        sqs = self._query("SELECT id FROM subquestions WHERE run_id=?", (run_id,))
+        plan_total = len(sqs)
+        gap_status, source = self._last_gap_status(run_id)
+        covered = partial = unresolved = 0
+        for v in gap_status.values():
+            if v == "coperta":
+                covered += 1
+            elif v == "parziale":
+                partial += 1
+            else:
+                unresolved += 1
+        # sotto-domande del piano assenti dall'ultimo status = non risolte
+        unresolved = max(unresolved, plan_total - covered - partial)
+        return {
+            "plan_total": plan_total,
+            "covered": covered,
+            "partial": partial,
+            "unresolved": unresolved,
+            "covered_of": plan_total,
+            "covered_ratio": (round(covered / plan_total, 3)
+                              if plan_total else None),
+            "source": source,
+        }
+
+    def _last_gap_status(self, run_id: str) -> tuple[dict[str, str], str]:
+        """Ultimo stato di copertura salvato: gap_status dell'ultimo evento
+        cycle_registry; fallback all'ultimo evento gap_detected (run piu'
+        vecchi del registro di ciclo)."""
+        status: dict[str, str] | None = None
+        source = ""
+        for row in self._query(
+                "SELECT payload_json FROM events WHERE run_id=? AND "
+                "type='cycle_registry' ORDER BY id", (run_id,)):
+            try:
+                payload = json.loads(row["payload_json"])
+            except ValueError:
+                continue
+            gs = payload.get("gap_status")
+            if isinstance(gs, dict) and gs:
+                status, source = gs, "cycle_registry.gap_status"
+        if status is None:
+            for row in self._query(
+                    "SELECT payload_json FROM events WHERE run_id=? AND "
+                    "type='gap_detected' ORDER BY id", (run_id,)):
+                try:
+                    payload = json.loads(row["payload_json"])
+                except ValueError:
+                    continue
+                st = payload.get("status")
+                if isinstance(st, dict) and st:
+                    status, source = st, "gap_detected.status"
+        return (status or {}), source
+
+    def _claim_support_metrics(self, run_id: str) -> dict[str, Any]:
+        ver = self._query(
+            "SELECT verdict, reason FROM verifications WHERE run_id=? ORDER BY id",
+            (run_id,))
+        support = {"supported": 0, "contradicted": 0,
+                   "insufficient": 0, "mixed": 0}
+        verdicts: dict[str, int] = {}
+        for row in ver:
+            vd = row["verdict"] or "UNKNOWN"
+            verdicts[vd] = verdicts.get(vd, 0) + 1
+            m = self._SUPPORT_RE.search(row["reason"] or "")
+            if m:
+                support[m.group(1)] += 1
+        stated = sum(support.values())
+        return {
+            "verifiable": len(ver),
+            **support,
+            "not_conclusive": max(0, len(ver) - stated),
+            "verdicts": verdicts,
+        }
+
+    def _citation_metrics(self, run_id: str) -> dict[str, Any]:
+        inline_markers = with_target = 0
+        rep = self.report_for_run(run_id)
+        if rep and rep.get("markdown"):
+            body, _sep, fonti = rep["markdown"].partition("## Fonti")
+            targets = {int(m.group(1))
+                       for m in self._FONTI_NUM_RE.finditer(fonti)}
+            markers = self._CITE_RE.findall(body)
+            inline_markers = len(markers)
+            with_target = sum(1 for n in markers if int(n) in targets)
+        return {
+            "inline_markers": inline_markers,
+            "with_target": with_target,
+            "without_target": inline_markers - with_target,
+        }
+
+    def _reading_yield_metrics(self, run_id: str) -> dict[str, Any]:
+        src = self._query(
+            "SELECT id, fetch_status, accepted, content_hash FROM sources "
+            "WHERE run_id=?", (run_id,))
+        ok_rows = [r for r in src
+                   if r["fetch_status"] in ("SUCCESS", "PARTIAL_CONTENT")]
+        seen_hashes: set[str] = set()
+        acquired = 0
+        for r in ok_rows:  # dedup per contenuto: una copia non e' una fonte nuova
+            h = r["content_hash"] or ""
+            if h:
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+            acquired += 1
+        readable = sum(1 for r in ok_rows if r["accepted"] == 1)
+        produced = self._query(
+            "SELECT COUNT(DISTINCT source_id) AS n FROM evidences WHERE run_id=?",
+            (run_id,))[0]["n"]
+        return {
+            "acquired": acquired,
+            "of_fetch_attempts": len(src),
+            "readable": readable,
+            "of_acquired": acquired,
+            "produced_evidence": produced,
+            "of_readable": readable,
+            "produced_ratio": (round(produced / readable, 3)
+                               if readable else None),
+        }
+
+    def _cycle_contribution_list(self, run_id: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for row in self._query(
+                "SELECT cycle, payload_json FROM events WHERE run_id=? AND "
+                "type='cycle_contribution' ORDER BY id", (run_id,)):
+            try:
+                payload = json.loads(row["payload_json"])
+            except ValueError:
+                continue
+            entry: dict[str, Any] = {"cycle": row["cycle"]}
+            entry.update(payload)
+            out.append(entry)
+        return out

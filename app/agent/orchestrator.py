@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.config import Depth
 from app.agent.query_generator import QueryGenerator
-from app.agent.search_state import SearchState
+from app.agent.search_state import SearchState, cycle_role
 from app.events.bus import EventBus
 from app.limits import LimitReached, RuntimeBudget
 from app.models import (Chunk, DecisionKind, DecisionSpec, Event, RunOutcome,
@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 
 _DEPTH_SUBQ = {Depth.RAPIDA: 3, Depth.STANDARD: 4, Depth.APPROFONDITA: 6}
 _MAX_EVIDENCES_PER_CYCLE = 60
+# Lettura a piccoli gruppi: il contributo viene rivalutato tra un gruppo e
+# l'altro (budget residuo / doc rimanenti) e un gruppo muto e' diagnosticato.
+_READ_GROUP_DOCS = 5
 
 
 def _unwrap(x):
@@ -43,6 +46,13 @@ class RunContext:
     timings: list = field(default_factory=list)
     cycle_tokens_in: int = 0
     cycle_tokens_out: int = 0
+    # Registro di ciclo (cycle_registry): accumulatori del ciclo in corso.
+    cycle_acc: dict = field(default_factory=dict)
+    # content_hash nuovi per ciclo (per new_vs_previous del registro)
+    hashes_by_cycle: dict = field(default_factory=dict)
+    # norm_url -> primo ciclo in cui la fonte e' stata acquisita
+    # (rileva ri-letture di URL noti con contenuto aggiornato)
+    url_seen_cycle: dict = field(default_factory=dict)
 
 
 class Orchestrator:
@@ -177,8 +187,25 @@ class Orchestrator:
                     break
                 ctx.cycle = cycle
                 # B4: ruolo del ciclo nel payload (esplorazione/approfondimento/verifica)
-                from app.agent.search_state import cycle_role as _cycle_role
-                self.emit(ctx, "cycle_started", cycle, role=_cycle_role(cycle))
+                self.emit(ctx, "cycle_started", cycle, role=cycle_role(cycle))
+                # Registro di ciclo: accumulatori del ciclo in corso (consumati
+                # da _emit_cycle_registry a fine ciclo)
+                ctx.cycle_acc = {
+                    "queries": [],
+                    "results_found": 0,
+                    "candidates": 0,
+                    "acquired_new": 0,
+                    "reused_cache": 0,
+                    "reused_evidences": 0,
+                    "reread_updated": 0,
+                    "reread_motivo": "",
+                    "duplicates": 0,
+                    "fetch_errors": 0,
+                    "docs_with_evidence": set(),
+                    "duplicate_ids": set(),
+                    "reading": [],
+                    "unread_for_budget": 0,
+                }
                 # B5: deadline di ciclo + snapshot token a inizio ciclo
                 cycle_deadline[0] = (time.monotonic() + per_cycle_s
                                      if per_cycle_s > 0 else 0.0)
@@ -294,10 +321,14 @@ class Orchestrator:
                     else:
                         text_queries.append(q)
                 self.emit(ctx, "query_started", cycle, count=len(queries))
+                # registro: le query ESEGUITE nel ciclo (testi, dopo dedup/cap)
+                ctx.cycle_acc["queries"] = [q.text for q in queries]
                 items = list(await self.searcher.run_queries(
                     text_queries, self.settings.max_pages_per_query))
                 if url_items:
                     items.extend(url_items)
+                # registro: risultati GREZZI del provider (prima del filtro URL visti)
+                ctx.cycle_acc["results_found"] = len(items)
                 # P1-5: persist query -> result links (multiple queries may hit
                 # the same URL: every pair is stored, never collapsed)
                 for q in queries:
@@ -309,6 +340,7 @@ class Orchestrator:
                             pos += 1
                 items = [it for it in items
                          if it.url not in seen_urls]  # no re-reads across cycles
+                ctx.cycle_acc["candidates"] = len(items)
                 # B4: scala di novità — prima i dominio-nuovi, poi i già-visti
                 from app.agent.search_state import novelty_score as _novelty
                 items.sort(key=lambda it: _novelty(it.url, shared_state),
@@ -330,6 +362,10 @@ class Orchestrator:
                 if items:
                     _t_fetch = time.perf_counter()
                     def _fetch_event(kind: str, url: str) -> None:
+                        # registro: pagine servite dalla cache disco (nessun download)
+                        if kind == "source_cache_hit":
+                            ctx.cycle_acc["reused_cache"] = (
+                                ctx.cycle_acc.get("reused_cache", 0) + 1)
                         self.emit(ctx, kind, cycle, url=url)
                     try:
                         docs = await self.fetcher.fetch_all(items, budget,
@@ -348,17 +384,36 @@ class Orchestrator:
                             if doc.content_hash:
                                 seen_content.add(doc.content_hash)
                             if is_dup:
+                                ctx.cycle_acc["duplicates"] += 1
+                                ctx.cycle_acc["duplicate_ids"].add(doc.source_id)
                                 self.emit(ctx, "source_duplicate", cycle,
                                           source_id=doc.source_id,
                                           url=doc.final_url or doc.url,
                                           content_hash=doc.content_hash)
                                 continue
+                            # registro: URL gia' letto in un ciclo precedente ma
+                            # con contenuto nuovo = pagina aggiornata (ri-lettura
+                            # con motivo); hash nuovo rispetto a TUTTI i cicli
+                            # precedenti = documento unico (new_vs_previous)
+                            norm = shared_state.norm_url(doc.final_url or doc.url)
+                            first_cycle = ctx.url_seen_cycle.get(norm)
+                            if first_cycle:
+                                ctx.cycle_acc["reread_updated"] += 1
+                                ctx.cycle_acc["reread_motivo"] = (
+                                    f"URL gia' letto al ciclo {first_cycle}, "
+                                    "contenuto aggiornato (content_hash nuovo)")
+                            if doc.content_hash:
+                                ctx.hashes_by_cycle.setdefault(
+                                    cycle, set()).add(doc.content_hash)
+                            ctx.url_seen_cycle[norm] = cycle
+                            ctx.cycle_acc["acquired_new"] += 1
                             ctx.stats["sources"] += 1
                             self.emit(ctx, "source_fetched", cycle,
                                       source_id=doc.source_id,
                                       url=doc.final_url or doc.url,
                                       reused=False)
                         else:
+                            ctx.cycle_acc["fetch_errors"] += 1
                             self.emit(ctx, "source_failed", cycle, source_id=doc.source_id,
                                       url=doc.url, error=doc.error)
                     accepted = await self._evaluate_docs(run_id, cycle, docs,
@@ -388,6 +443,8 @@ class Orchestrator:
                         ctx, question, cycle, open_sqs, shared_state,
                         cycle_budget_box)
                     evidences.extend(reused_evs)
+                    # registro: evidenze prodotte dal RIUSO di chunk gia' in storage
+                    ctx.cycle_acc["reused_evidences"] = len(reused_evs)
                     ctx.timings.append({"cycle": cycle, "step": "read(LLM)",
                                           "s": round(time.perf_counter() - _t_read, 1)})
                     log.debug("[TEMPI] ciclo %s read=%.1fs", cycle,
@@ -408,6 +465,9 @@ class Orchestrator:
                         stop_reason, stop_detail = "LIMITE_CICLO", (
                             f"budget per ciclo esaurito: {per_cycle_s}s al ciclo {cycle}")
                         log.debug("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
+                        self._emit_cycle_registry(ctx, cycle, shared_state,
+                                                  early="budget per-ciclo "
+                                                        "esaurito prima del gap check")
                         self.emit(ctx, "cycle_completed", cycle, complete=True,
                                   stop_reason=stop_reason, stop_detail=stop_detail)
                         break
@@ -418,6 +478,9 @@ class Orchestrator:
                     if cancel.is_set():
                         status = "cancelled"
                         stop_reason, stop_detail = "ANNULLATO", "richiesta utente"
+                        self._emit_cycle_registry(ctx, cycle, shared_state,
+                                                  early="annullato prima del "
+                                                        "gap check")
                         break
                     if cycle_deadline[0] and time.monotonic() > cycle_deadline[0]:
                         limit_note = (limit_note or
@@ -425,6 +488,9 @@ class Orchestrator:
                         stop_reason, stop_detail = "LIMITE_CICLO", (
                             f"budget per ciclo esaurito: {per_cycle_s}s al ciclo {cycle}")
                         log.debug("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
+                        self._emit_cycle_registry(ctx, cycle, shared_state,
+                                                  early="budget per-ciclo "
+                                                        "esaurito prima del gap check")
                         self.emit(ctx, "cycle_completed", cycle, complete=True,
                                   stop_reason=stop_reason, stop_detail=stop_detail)
                         break
@@ -455,6 +521,12 @@ class Orchestrator:
                                       "s": round(time.perf_counter() - _t_gap, 1)})
                 log.debug("[TEMPI] ciclo %s gap=%.1fs", cycle,
                           time.perf_counter() - _t_gap)
+
+                # ---- registro di ciclo (consultabile) ----
+                # emesso PRIMA del punto di terminazione: anche l'ultimo ciclo
+                # porta il suo registro, con lo stato di copertura del gap check
+                self._emit_cycle_registry(ctx, cycle, shared_state,
+                                          gap_status=report.status_by_id)
 
                 # ---- UNIQUE termination point ----
                 stop, stop_reason, stop_detail = self._should_stop(
@@ -624,6 +696,9 @@ class Orchestrator:
             agg = by_cycle.setdefault(cyc, {"seconds": 0.0})
             agg["new_evidences"] = contribution.get("new_evidences", 0)
             agg["new_domains"] = contribution.get("new_domains", 0)
+        # registro di ciclo consultabile (ciclo -> payload cycle_registry),
+        # persistito in runs.limits_json sotto la chiave "cycles"
+        stats["cycles"] = ctx.stats.get("cycles_registry", {})
         # usage counters (llm client counters are process-cumulative: exact in CLI,
         # approximate for a long-lived server sharing one client across runs)
         self.storage.usage_inc(
@@ -732,11 +807,20 @@ class Orchestrator:
         - B6: ogni doc letto viene registrato in shared_state.read_sources con
           le sotto-domande usate, cosi' i cicli successivi possono riusare i
           chunk da storage senza ri-leggere la fonte.
+        - REGISTRO DI CICLO: lettura a piccoli gruppi (_READ_GROUP_DOCS) con
+          rivalutazione del contributo tra gruppi (un gruppo con 0 evidenze
+          viene diagnosticato via log.warning) e metriche di rendimento per
+          fonte (content_len, passages_read, evidences_from, full_or_partial)
+          accumulate in ctx.cycle_acc["reading"] per il cycle_registry.
         """
         evidences: list = []
         per_source_cap = max(1, self.settings.reader_chunks_per_source)
         remaining_docs = len(accepted_docs)
         budget = budget_box if budget_box is not None else [_MAX_EVIDENCES_PER_CYCLE]
+        # registro di ciclo: metriche di rendimento per fonte letta
+        acc = ctx.cycle_acc if ctx is not None else {}
+        reading_metrics = acc.setdefault("reading", [])
+        docs_with_ev = acc.setdefault("docs_with_evidence", set())
 
         def _kw(text: str) -> set[str]:
             stop = {"della", "dello", "delle", "degli", "nella", "nel", "per",
@@ -773,48 +857,89 @@ class Orchestrator:
             picked.sort(key=lambda c: c.idx)  # keep reading order
             return picked
 
-        for doc in accepted_docs:
-            if budget[0] <= 0:
-                break
-            share = max(1, -(-budget[0] // max(1, remaining_docs)))  # ceil division
-            chunks = _pick_chunks(doc)[:max(1, min(per_source_cap, share))]
-            remaining_docs -= 1
-            doc_ev = 0          # evidenze di QUESTO documento (count parziale)
-            used_sqs: set[str] = set()
-            for ch in chunks:
+        # Budget a GRUPPI piccoli: la condivisione per-fonte resta quella per
+        # documento (ceil(residuo / doc rimanenti)), ma tra un gruppo e l'altro
+        # il contributo viene rivalutato e un gruppo muto viene diagnosticato.
+        for g_start in range(0, len(accepted_docs), _READ_GROUP_DOCS):
+            group = accepted_docs[g_start:g_start + _READ_GROUP_DOCS]
+            ev_at_group_start = len(evidences)
+            budget_at_group_start = budget[0]
+            for doc in group:
                 if budget[0] <= 0:
                     break
-                sq = _best_sq(ch) if sq_tokens else (
-                    subquestions[0] if subquestions else None)
-                self.emit(ctx, "source_reading", cycle, url=doc.final_url or doc.url,
-                          subquestion=sq.text if sq else "", reused=False)
-                found = await self.reader.extract_evidences(
-                    question, sq.text if sq else "", ch,
-                    max_evidences=min(4, budget[0]),
-                    subquestion_id=sq.subquestion_id if sq else None)
-                self.storage.add_chunk(ch)
-                if sq is not None:
-                    used_sqs.add(sq.subquestion_id)
-                for e in found:
-                    e.run_id = ctx.run_id
-                    self.storage.add_evidence(e)
-                    evidences.append(e)
-                    doc_ev += 1
-                    budget[0] -= 1
-                # B6 live: il contatore cresce DURANTE la lettura, non a fine ciclo
-                ctx.stats["evidences"] += len(found)
-                self._maybe_emit_usage(ctx)
-            # B6 live: evento per SINGOLO documento (count parziale, total cumulativo)
-            self.emit(ctx, "evidence_extracted", cycle, count=doc_ev,
-                      total=ctx.stats["evidences"])
-            # B6: registra la fonte come gia' letta (per il riuso nei cicli dopo)
-            if shared_state is not None:
-                shared_state.read_sources[doc.source_id] = {
-                    "url": doc.url, "final_url": doc.final_url or doc.url,
-                    "title": doc.title, "domain": doc.domain, "cycle": cycle}
-                if used_sqs:
-                    (shared_state.used_sq_by_source.setdefault(doc.source_id, set())
-                     .update(used_sqs))
+                share = max(1, -(-budget[0] // max(1, remaining_docs)))  # ceil division
+                chunks = _pick_chunks(doc)[:max(1, min(per_source_cap, share))]
+                remaining_docs -= 1
+                doc_ev = 0          # evidenze di QUESTO documento (count parziale)
+                passages = 0        # chunk effettivamente letti del documento
+                used_sqs: set[str] = set()
+                for ch in chunks:
+                    if budget[0] <= 0:
+                        break
+                    passages += 1
+                    sq = _best_sq(ch) if sq_tokens else (
+                        subquestions[0] if subquestions else None)
+                    self.emit(ctx, "source_reading", cycle, url=doc.final_url or doc.url,
+                              subquestion=sq.text if sq else "", reused=False)
+                    found = await self.reader.extract_evidences(
+                        question, sq.text if sq else "", ch,
+                        max_evidences=min(4, budget[0]),
+                        subquestion_id=sq.subquestion_id if sq else None)
+                    self.storage.add_chunk(ch)
+                    if sq is not None:
+                        used_sqs.add(sq.subquestion_id)
+                    for e in found:
+                        e.run_id = ctx.run_id
+                        self.storage.add_evidence(e)
+                        evidences.append(e)
+                        doc_ev += 1
+                        budget[0] -= 1
+                    # B6 live: il contatore cresce DURANTE la lettura, non a fine ciclo
+                    ctx.stats["evidences"] += len(found)
+                    self._maybe_emit_usage(ctx)
+                # B6 live: evento per SINGOLO documento (count parziale, total cumulativo)
+                self.emit(ctx, "evidence_extracted", cycle, count=doc_ev,
+                          total=ctx.stats["evidences"])
+                # registro: rendimento della lettura di QUESTA fonte
+                if doc_ev:
+                    docs_with_ev.add(doc.source_id)
+                reading_metrics.append({
+                    "source_id": doc.source_id,
+                    "url": doc.final_url or doc.url,
+                    "content_len": len(doc.text),
+                    "passages_read": passages,
+                    "evidences_from": doc_ev,
+                    "full_or_partial": (
+                        "PARTIAL_CONTENT"
+                        if doc.fetch_status.value == "PARTIAL_CONTENT"
+                        else "SUCCESS"),
+                    "duplicate": doc.source_id in acc.get("duplicate_ids", set()),
+                })
+                # B6: registra la fonte come gia' letta (per il riuso nei cicli dopo)
+                if shared_state is not None:
+                    shared_state.read_sources[doc.source_id] = {
+                        "url": doc.url, "final_url": doc.final_url or doc.url,
+                        "title": doc.title, "domain": doc.domain, "cycle": cycle}
+                    if used_sqs:
+                        (shared_state.used_sq_by_source.setdefault(doc.source_id, set())
+                         .update(used_sqs))
+            # rivalutazione del contributo del gruppo (diagnosticabilita')
+            group_ev = len(evidences) - ev_at_group_start
+            if group_ev == 0 and group:
+                if budget_at_group_start <= 0 or budget[0] <= 0:
+                    log.warning(
+                        "[LETTURA] ciclo %s: gruppo doc %d-%d non letto, "
+                        "budget evidenze esaurito (0 rimanenti)", cycle,
+                        g_start + 1, g_start + len(group))
+                else:
+                    log.warning(
+                        "[LETTURA] ciclo %s: gruppo doc %d-%d prodotto 0 "
+                        "evidenze su %d documenti letti (possibile selezione "
+                        "chunk poco rilevante): %s", cycle, g_start + 1,
+                        g_start + len(group), len(group),
+                        [d.source_id for d in group])
+        # registro: documenti accettati ma non letti (budget esaurito)
+        acc["unread_for_budget"] = max(0, len(accepted_docs) - len(reading_metrics))
         return evidences
 
     async def _reuse_chunks(self, ctx, question, cycle, open_sqs,
@@ -886,6 +1011,95 @@ class Orchestrator:
         ctx.stats.setdefault("per_cycle", {})[cycle] = entry
         self.emit(ctx, "cycle_contribution", cycle, **entry)
         return entry
+
+    # ---------- registro di ciclo ----------
+    def _pages_limit_origin(self, acc: dict) -> str:
+        """Diagnosi DERIVATA dai numeri reali del ciclo: da dove nasce il
+        limite di pagine lette (cap query×pagine? risultati disponibili?
+        deduplicati? errori? cache?)."""
+        queries = acc.get("queries", ())
+        q_exec = len(queries)
+        p_cap = self.settings.max_pages_per_query
+        q_cap = self.settings.max_queries_per_cycle
+        raw = acc.get("results_found", 0)
+        cand = acc.get("candidates", 0)
+        dups = acc.get("duplicates", 0)
+        errs = acc.get("fetch_errors", 0)
+        cache = acc.get("reused_cache", 0)
+        acquired = acc.get("acquired_new", 0)
+        cap = q_exec * p_cap
+        if q_exec == 0:
+            return ("nessuna query eseguita nel ciclo (tutte gia' viste o cap "
+                    f"max_queries_per_cycle={q_cap} esaurito): nessuna pagina "
+                    "acquisibile")
+        if raw == 0:
+            return (f"0 risultati dal provider su {q_exec} query: nessun "
+                    f"candidato (cap teorico {cap} = {q_exec} query × "
+                    f"{p_cap} pagine/query)")
+        parts = [f"cap teorico {cap} = {q_exec} query eseguite × "
+                 f"max_pages_per_query={p_cap} (max_queries_per_cycle={q_cap})"]
+        if raw < cap:
+            parts.append(f"il provider ha restituito {raw} risultati (< cap): "
+                         "disponibile meno del massimo teorico")
+        dropped = raw - cand
+        if dropped > 0:
+            parts.append(f"{dropped} scartati perche' URL gia' visti in cicli "
+                         "precedenti (deduplicati tra cicli)")
+        if errs:
+            parts.append(f"{errs} errori di fetch")
+        if dups:
+            parts.append(f"{dups} duplicati di contenuto scartati "
+                         "(stesso content_hash)")
+        if cache:
+            parts.append(f"{cache} serviti dalla cache disco (nessun ri-download)")
+        parts.append(f"→ {acquired} nuove fonti acquisite")
+        return "; ".join(parts)
+
+    def _emit_cycle_registry(self, ctx, cycle: int,
+                             shared_state: SearchState | None = None,
+                             gap_status: dict | None = None,
+                             early: str = "") -> dict:
+        """Fine ciclo: REGISTRO CONSULTABILE — emesso come evento
+        cycle_registry e conservato in ctx.stats["cycles_registry"] (poi
+        persistito in runs.limits_json sotto la chiave "cycles").
+
+        Fonti dei dati: accumulatori del ciclo (ctx.cycle_acc: query, risultati,
+        fetch, dedup), SearchState, seen_content per ciclo (ctx.hashes_by_cycle).
+        """
+        acc = ctx.cycle_acc or {}
+        hashes_now = ctx.hashes_by_cycle.get(cycle, set())
+        prev_hashes: set[str] = set()
+        for c, hs in ctx.hashes_by_cycle.items():
+            if c < cycle:
+                prev_hashes |= hs
+        payload = {
+            "cycle": cycle,
+            "role": cycle_role(cycle),
+            "queries_executed": list(acc.get("queries", ())),
+            "results_found": acc.get("results_found", 0),
+            "candidates": acc.get("candidates", 0),
+            "acquired_new": acc.get("acquired_new", 0),
+            "reused_cache": acc.get("reused_cache", 0),
+            "reused_evidences": acc.get("reused_evidences", 0),
+            "reread_updated": acc.get("reread_updated", 0),
+            "reread_motivo": acc.get("reread_motivo", ""),
+            "duplicates": acc.get("duplicates", 0),
+            "fetch_errors": acc.get("fetch_errors", 0),
+            "docs_with_evidence": len(acc.get("docs_with_evidence", set())),
+            "new_vs_previous": len(hashes_now - prev_hashes),
+            "unread_for_budget": acc.get("unread_for_budget", 0),
+            "reading": list(acc.get("reading", ())),
+            "pages_limit_origin": self._pages_limit_origin(acc),
+            "gap_status": dict(gap_status) if gap_status else None,
+        }
+        if early:
+            payload["terminated_early"] = early
+        # il payload porta gia' "cycle": non ripeterlo come argomento posizionale
+        event_payload = {k: v for k, v in payload.items() if k != "cycle"}
+        self.emit(ctx, "cycle_registry", cycle, **event_payload)
+        ctx.stats.setdefault("cycles_registry", {})[str(cycle)] = payload
+        ctx.cycle_acc = {}
+        return payload
 
     def _maybe_emit_usage(self, ctx) -> None:
         """Throttled usage_update so the UI shows live counters."""

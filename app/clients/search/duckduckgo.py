@@ -1,8 +1,9 @@
 """DuckDuckGo HTML search client: keyless provider (best-effort, no API)."""
 from __future__ import annotations
 
+import base64
 import logging
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -12,6 +13,133 @@ from app.models import SearchResultItem
 log = logging.getLogger(__name__)
 
 _ENDPOINT = "https://html.duckduckgo.com/html/"
+
+# Parametri che MARCANO un risultato come sponsorizzato/affiliato: presenti ->
+# il "documento" e' un annuncio, non una fonte. Si prova a estrarre la
+# destinazione reale (uddg/u3/url/...); se assente o invalida, si scarta.
+_AD_PARAM_MARKERS = {
+    "ad_domain", "ad_provider", "ad_provider_id", "ad_image_url", "ad_click",
+    "ad_type", "aff", "affiliate", "affid", "affiliate_id", "partner_id",
+}
+# Parametri di TRACKING puro: non cambiano la destinazione, vengono rimossi
+# dall'URL finale cosi' il provenance non registra identificativi campagne.
+_TRACKING_PARAMS = {"gclid", "fbclid", "msclkid", "dclid", "twclid",
+                    "mc_cid", "mc_eid"}
+_TRACKING_PREFIXES = ("utm_",)
+# Host/path intermedi riconosciuti come PUBBLICITA' (redirect di ad network):
+# duckduckgo.com/y.js = risultati sponsorizzati DDG; /aclk (Google), /aclick
+# (Bing); i restanti sono ad network/affiliazione classici.
+_AD_INTERMEDIATE_PATHS = {"/y.js", "/aclk", "/aclick"}
+_AD_NETWORK_HOSTS = {
+    "clickserve.dartsearch.net", "www.googleadservices.com",
+    "www.anrdoezrs.net", "click.linksynergy.com", "www.awin1.com",
+    "track.adform.net", "www.tkqlhce.com", "www.jdoqocy.com",
+}
+# parametri che possono contenere l'URL di destinazione reale
+_TARGET_PARAM_KEYS = ("uddg", "u", "url", "u3", "target", "destination")
+
+
+def _is_valid_http(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
+def _decode_u3(raw: str) -> str:
+    """Decodifica il parametro u3 dei link sponsorizzati DDG (base64url)."""
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        return base64.urlsafe_b64decode(padded).decode("utf-8", "ignore")
+    except Exception:
+        return raw  # forse non era base64: la validazione a valle decidera'
+
+
+def _is_ad_intermediate(url: str) -> bool:
+    """True se l'URL e' un INTERMEDIO pubblicitario: host/path di ad network
+    (duckduckgo.com/y.js, googleadservices, /aclk, /aclick, ...)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    path = parts.path or ""
+    if host in _AD_NETWORK_HOSTS:
+        return True
+    if host in ("duckduckgo.com", "www.duckduckgo.com") and \
+            path in _AD_INTERMEDIATE_PATHS:
+        return True
+    return path in _AD_INTERMEDIATE_PATHS
+
+
+def _is_ad_redirect(url: str) -> bool:
+    """True se l'URL e' SPONSORIZZATO: intermedio pubblicitario OPPURE parametri
+    ad/affiliazione presenti (es. ad_domain sui risultati sponsorizzati DDG)."""
+    if _is_ad_intermediate(url):
+        return True
+    try:
+        q = parse_qs(urlsplit(url).query)
+    except ValueError:
+        return False
+    return bool(_AD_PARAM_MARKERS & set(q))
+
+
+def _extract_ad_target(url: str) -> str | None:
+    """URL reale di destinazione di un annuncio, se presente e valido."""
+    q = parse_qs(urlsplit(url).query)
+    for key in _TARGET_PARAM_KEYS:
+        vals = q.get(key)
+        if not vals:
+            continue
+        raw = _decode_u3(vals[0]) if key == "u3" else unquote(vals[0])
+        if key == "q" and not raw.lower().startswith(("http://", "https://")):
+            continue  # q= e' spesso un termine di ricerca, non una destinazione
+        if _is_valid_http(raw) and not _is_ad_redirect(raw):
+            return raw
+    return None
+
+
+def _strip_ad_tracking_params(url: str) -> str:
+    """Rimuove parametri ad/affiliazione/tracking residui da un URL organic."""
+    try:
+        parts = urlsplit(url)
+        q = parse_qs(parts.query, keep_blank_values=True)
+    except ValueError:
+        return url
+    filtered = []
+    for k, vals in q.items():
+        if k in _AD_PARAM_MARKERS or k in _TRACKING_PARAMS or \
+                k.startswith(_TRACKING_PREFIXES):
+            continue
+        filtered.append((k, vals[0]))
+    # ricostruisce SEMPRE: se tutti i parametri erano ad/tracking la query
+    # va VUOTA (l'early-return here reintrodurrebbe i parametri pubblicitari)
+    return urlunsplit(parts._replace(query=urlencode(filtered)))
+
+
+def _resolve_result_url(href: str) -> str | None:
+    """URL da registrare per un risultato SERP.
+
+    Organico -> URL pulito (wrapper /l/?uddg= rimosso, tracking spogliato).
+    Intermedio pubblicitario (duckduckgo.com/y.js, ad network) -> destinazione
+    reale se estraibile e valida, ALTRIMENTI None: l'URL pubblicitario NON e'
+    mai registrato come documento. Un host normale con SOLO parametri
+    di affiliazione/tracking resta un documento: i parametri vengono spogliati.
+    """
+    url = _clean_url(href)
+    if not _is_valid_http(url):
+        return None
+    if _is_ad_intermediate(url):
+        target = _extract_ad_target(url)
+        if target:
+            log.info("duckduckgo: risultato sponsorizzato -> destinazione "
+                     "reale %s", target)
+            return _strip_ad_tracking_params(target)
+        log.info("duckduckgo: scartato annuncio senza destinazione valida: %s",
+                 url)
+        return None
+    return _strip_ad_tracking_params(url)
 
 
 def _clean_url(href: str) -> str:
@@ -52,7 +180,9 @@ def _parse_results(html: str, max_results: int) -> list[SearchResultItem]:
         if gt == -1:
             continue
         title = _strip_tags(chunk[gt + 1:chunk.find("<", gt)]).strip()
-        url = _clean_url(href)
+        url = _resolve_result_url(href)
+        if url is None:
+            continue  # annuncio senza destinazione valida: NON e' un documento
         if not url.startswith("http") or not title:
             continue
         snip = ""

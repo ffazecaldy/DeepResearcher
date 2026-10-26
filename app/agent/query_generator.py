@@ -15,6 +15,63 @@ _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 _SIMILARITY_THRESHOLD = 0.6  # Jaccard over token sets
 _MAX_REGEN_ATTEMPTS = 2
 
+# Cambio strategia: soglie per decidere che le prossime ricerche sugli stessi
+# binari restituirebbero soprattutto documenti GIA' LETTI. Deterministico,
+# calcolato sullo stato passato al prompt (URL visti, domini, query eseguite).
+_STRATEGY_SHIFT_MIN_URLS = 5       # sotto questa soglia lo stato non e' signif.
+_STRATEGY_SHIFT_TOP_SHARE = 0.6    # >=60% degli URL visti su UN solo dominio
+_STRATEGY_SHIFT_MIN_QUERIES = 8    # tante query gia' eseguite -> corpus saturo
+
+
+def needs_strategy_shift(state: SearchState) -> bool:
+    """True quando lo stato indica saturazione: nuove query "piu' dello stesso"
+    tornerebbero soprattutto documenti gia' letti/valutati.
+
+    Segnali (basta uno):
+    - molti URL visti concentrati su pochissimi domini (top-share elevata);
+    - tante query gia' eseguite rispetto alla produzione di novita';
+    - diversi URL letti ma quasi nessuna evidenza estratta.
+    """
+    n_seen = len(state.seen_urls)
+    if n_seen == 0:
+        return False
+    if len(state.executed_queries) >= _STRATEGY_SHIFT_MIN_QUERIES:
+        return True
+    if n_seen >= _STRATEGY_SHIFT_MIN_URLS and state.evidence_count == 0:
+        return True
+    top = max(state.domain_count.values(), default=0)
+    return (n_seen >= _STRATEGY_SHIFT_MIN_URLS
+            and n_seen > 0 and top / n_seen >= _STRATEGY_SHIFT_TOP_SHARE)
+
+
+def _strategy_shift_block(state: SearchState) -> str:
+    """Estensione del prompt: cambio strategia esplicito + documenti utili letti."""
+    n_seen = len(state.seen_urls)
+    top_domain = (max(state.domain_count.items(), key=lambda kv: kv[1])[0]
+                  if state.domain_count else "sconosciuto")
+    docs: list[str] = []
+    for meta in list(state.read_sources.values())[-3:]:
+        title = str(meta.get("title") or meta.get("url") or "").strip()
+        dom = str(meta.get("domain") or "").strip()
+        docs.append(f"- {title} ({dom})" if dom else f"- {title}")
+    doc_lines = "\n".join(docs) if docs else "- (nessun documento utile memorizzato)"
+    return (
+        "\n\nCAMBIO STRATEGIA RICHIESTO: le ricerche precedenti hanno "
+        "restituito soprattutto documenti gia' letti o valutati "
+        f"({n_seen} URL visti; dominio dominante: {top_domain}). Le nuove "
+        "query DEVONO cambiare strategia in modo ESPLICITO:\n"
+        "1. termini di ricerca diversi (sinonimi, altro lessico, altra "
+        "angolazione — non riphrasing di quelle gia' eseguite);\n"
+        "2. tipo di fonte diverso (es. da notizie a documentazione "
+        "istituzionale/accademica, o viceversa);\n"
+        "3. lingua diversa: almeno una query in una lingua non ancora usata;\n"
+        "4. ricerca bibliografica: bibliografie, revisioni, \"related work\", "
+        "liste di riferimenti;\n"
+        "5. riferimenti dei documenti utili gia' letti: parti dai documenti "
+        "elencati sotto e cerca i documenti che LORO citano (non rileggerli).\n"
+        "Documenti gia' letti (usa i loro riferimenti):\n"
+        f"{doc_lines}")
+
 
 class QueryGeneratorError(RuntimeError):
     """The query generator could not obtain valid JSON after retries."""
@@ -78,6 +135,13 @@ class QueryGenerator:
         done_json = json.dumps(state.executed_queries[-30:], ensure_ascii=False)
         user = user_tpl.format(question=question, subquestions_json=sq_json,
                                executed_queries_json=done_json)
+        # cambio strategia: se lo stato dice che la ricerca tornerebbe
+        # soprattutto documenti gia' letti, estendi il prompt PRIMA della call
+        if needs_strategy_shift(state):
+            log.info("query_generator: stato saturo (%d URL visti, %d query) "
+                     "-> cambio strategia richiesto nel prompt",
+                     len(state.seen_urls), len(state.executed_queries))
+            user = user + _strategy_shift_block(state)
 
         accepted: list[GeneratedQuery] = []
         prompt = user

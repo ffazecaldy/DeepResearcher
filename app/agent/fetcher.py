@@ -136,6 +136,11 @@ class Fetcher:
                 pass
         cached = self._from_cache(url)
         if cached is not None:
+            if on_event:
+                try:
+                    on_event("source_cache_hit", url)
+                except Exception:
+                    pass
             return cached
         if on_event:
             try:

@@ -78,6 +78,23 @@ def _trim_evidences(evidences: list[Evidence],
     return ordered
 
 
+def _strip_malformed_emphasis(markdown: str) -> str:
+    """PROPORZIONE: no asterischi grezzi malformati (il corsivo e' del renderer).
+
+    Una riga di testo con un numero DISPARI di '*' non puo' contenere enfasi
+    markdown valida (ogni *testo* / **testo** e' bilanciato): gli asterischi
+    vengono rimossi invece di lasciare formattazione rotta. Le righe composte
+    solo da asterischi/spazi (separatori tipo `***`) e l'enfasi bilanciata
+    restano intatte.
+    """
+    fixed: list[str] = []
+    for line in markdown.splitlines():
+        if line.count("*") % 2 == 1 and re.search(r"[^\s*]", line):
+            line = line.replace("*", "")
+        fixed.append(line)
+    return "\n".join(fixed)
+
+
 class Writer:
     def __init__(self, llm, prompts_dir: Path | None = None):
         self._llm = llm
@@ -135,6 +152,8 @@ class Writer:
         markdown = str(data.get("markdown", "")).strip()
         # single H1: the writer must NOT emit its own top title (added once later)
         markdown = re.sub(r"^\s*#\s+[^\n]+\n+", "", markdown)
+        # PROPORZIONE: frasi rese proporzionate senza asterischi grezzi malformati
+        markdown = _strip_malformed_emphasis(markdown)
         title = str(data.get("title", "")).strip() or question.strip()
         if limit_note:
             markdown += (f"\n\n> Nota: {limit_note}\n")
@@ -177,6 +196,13 @@ class Writer:
                       if str(x) in valid_ids]
             if not text or not ev_ids:
                 continue
+            # PROPORZIONE: "hedged" e' facoltativo (assenza = False); tollera
+            # valori non booleani senza rompere il parsing del report.
+            hedged = c.get("hedged", False)
+            if isinstance(hedged, str):
+                hedged = hedged.strip().lower() in ("true", "1", "yes", "si", "sì")
+            else:
+                hedged = bool(hedged)
             claims.append(ReportClaim(text=text, citation_no=0,
-                                      evidence_ids=ev_ids))
+                                      evidence_ids=ev_ids, hedged=hedged))
         return claims

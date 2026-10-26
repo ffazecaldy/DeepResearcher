@@ -129,7 +129,7 @@
       <span class="sbi" title="Durata della ricerca"><svg class="ic s12" aria-hidden="true"><use href="#i-clock"/></svg><b id="sb-time" class="num">—</b></span>
       <span class="sbi" title="Ciclo di ricerca corrente">ciclo <b id="sb-cycle" class="num">-</b></span>
       <span class="sbi" title="Query di ricerca pianificate">query <b id="sb-queries" class="num">0</b></span>
-      <span class="sbi" title="Fonti lette e accettate">fonti <b id="sb-sources" class="num">0</b></span>
+      <span class="sbi" title="Fonti lette con successo — la tab Fonti conta invece tutte le fonti trovate, incluse fallite e duplicati (per questo i due numeri possono differire)">fonti <b id="sb-sources" class="num">0</b></span>
       <span class="sbi" title="Evidenze estratte dalle fonti">evidenze <b id="sb-evidence" class="num">0</b></span>
       <span class="sbi sbi-click" id="sb-claims-box" role="button" tabindex="0"
             title="Claim (frasi) estratti dal report finale — clic per aprire la vista Verifiche">claims estratti <b id="sb-claims" class="num">0</b></span>
@@ -148,6 +148,16 @@
         <span class="tdi" title="Token LLM in ingresso + in uscita">token <b id="sb-tokens" class="num">0</b></span>
         <span class="tdi" title="Chiamate LLM"><svg class="ic s12" aria-hidden="true"><use href="#i-cpu"/></svg><b id="sb-llm" class="num">0</b></span>
         <span class="tdi" title="Motore di decisione">engine <b id="sb-engine">...</b></span>
+      </div>
+      <div class="td-legend" aria-label="Legenda dei contatori e degli stati">
+        <span class="tdl"><b>fonti trovate</b> — tutte le righe sorgente del run, incluse fallite e duplicati (tab Fonti)</span>
+        <span class="tdl"><b>fonti lette</b> — scaricate e lette con successo (contatore "fonti" della statusbar)</span>
+        <span class="tdl"><b>fonti citate</b> — con almeno una citazione [n] nel report finale</span>
+        <span class="tdl"><b>supportate</b> — il verifier ha trovato evidenze che riportano la stessa informazione</span>
+        <span class="tdl"><b>contraddette</b> — almeno una fonte riferisce il contrario</span>
+        <span class="tdl"><b>insufficienti</b> — le evidenze raccolte non bastano a confermare la frase (nell'export: "evidenze insufficienti")</span>
+        <span class="tdl"><b>contrastate</b> — le fonti sono in disaccordo tra loro</span>
+        <span class="tdl"><b>non conclusive</b> — verifica non completata per errore tecnico; la frase può essere ancora nel report o già gestita</span>
       </div>
     </details>
 
@@ -231,9 +241,11 @@
           <button type="button" class="rtab active" data-view="report" role="tab"
                   aria-selected="true" aria-controls="view-report">Report</button>
           <button type="button" class="rtab" data-view="sources" role="tab" hidden
-                  aria-selected="false" aria-controls="view-sources">Fonti <span id="tab-sources-n" class="rtab-n"></span></button>
+                  aria-selected="false" aria-controls="view-sources"
+                  title="Tutte le fonti trovate, incluse fallite e duplicati (il contatore della statusbar 'fonti' conta solo quelle lette con successo)">Fonti <span id="tab-sources-n" class="rtab-n"></span></button>
           <button type="button" class="rtab" data-view="verifs" role="tab" hidden
-                  aria-selected="false" aria-controls="view-verifs">Verifiche <span id="tab-verifs-n" class="rtab-n"></span></button>
+                  aria-selected="false" aria-controls="view-verifs"
+                  title="Tutte le verifiche eseguite sui claims del report, con stato di supporto e causa">Verifiche <span id="tab-verifs-n" class="rtab-n"></span></button>
         </nav>
         <span class="acts">
           <span id="report-search-wrap" class="rsearch-wrap">

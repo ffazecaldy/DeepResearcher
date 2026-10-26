@@ -47,6 +47,7 @@ const state = {
   lastCitationBtn: null,   // per Escape: focus all'ultimo bottone citazione
   verifsFilter: null,      // FIX 11: filtro vista Verifiche {kind,value}
   verifsData: null,        // report.json corrente (re-render con filtro)
+  cycleStats: null,        // Map ciclo -> contributi (da eventi cycle_* del feed)
   reportScroll: new Map(), // FIX 9: runId -> scrollTop (ripristino solo stesso run)
   lastReportRun: null,     // ultimo run renderizzato (aggiornamenti in streaming)
 };
@@ -112,6 +113,40 @@ function stripSupportPrefix(reason) {
   return String(reason || "").replace(/^\[support:\w+\]\s*/, "");
 }
 
+/* prefisso [cause:X] opzionale nel verdict_reason: causa strutturata del
+   mancato supporto / della verifica non conclusiva. Se assente NON si
+   inventa: la riga mostra solo il motivo testuale. */
+const CAUSE_RE = /\[cause:(no_relevant_evidence|evidence_insufficient|doc_missing|truncated|overstated|contradiction|technical_error|invalid_output)\]/;
+const CAUSE_IT = {
+  no_relevant_evidence: "nessuna evidenza pertinente",
+  evidence_insufficient: "evidenze insufficienti",
+  doc_missing: "documento non disponibile",
+  truncated: "fonte letta solo in parte",
+  overstated: "affermazione più forte delle fonti",
+  contradiction: "fonti in contraddizione",
+  technical_error: "errore tecnico",
+  invalid_output: "esito del verifier non valido",
+};
+const CAUSE_ACTION = {
+  no_relevant_evidence: "cercare fonti più pertinenti: ripeti la ricerca con una domanda più mirata",
+  evidence_insufficient: "ripeti la ricerca per raccogliere più fonti sull'argomento",
+  doc_missing: "riprovare più tardi o aprire direttamente la fonte citata",
+  truncated: "ripeti la ricerca: la pagina verrà riletta per intero",
+  overstated: "confronta la frase con le fonti citate: va letta in modo più cauto",
+  contradiction: "confronta le fonti citate: riportano affermazioni in conflitto",
+  technical_error: "riprovare più tardi",
+  invalid_output: "riprovare più tardi",
+};
+function parseCause(reason) {
+  const m = CAUSE_RE.exec(String(reason || ""));
+  return m ? m[1] : null;
+}
+/* il token [cause:X] è metadato, non testo: non va mostrato nel motivo */
+function stripCauseToken(reason) {
+  return String(reason || "")
+    .replace(/\s*\[cause:\w+\]\s*/g, " ").replace(/\s+/g, " ").trim();
+}
+
 /* ============================== api ============================== */
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -156,7 +191,7 @@ function openStream(runId) {
     "report_final",
     // eventi nuovi lato backend
     "source_queued", "source_fetching", "source_reading", "usage_update",
-    "source_duplicate", "source_reused", "cycle_contribution",
+    "source_duplicate", "source_reused", "cycle_contribution", "cycle_registry",
   ];
   types.forEach((t) => es.addEventListener(t, (e) => {
     try { handleEvent(JSON.parse(e.data)); } catch (err) { console.error(err); }
@@ -396,6 +431,7 @@ function handleEvent(ev) {
     state.lastSeq.set(state.runId, ev.seq);
   }
   addActivity(type, cycle, p);
+  trackCycleEvent(type, cycle, p);
   handleAction(type, p);
   updateCycleTabs(type, cycle);
   updateReadingIndicator(type);
@@ -1442,6 +1478,7 @@ function resetPanels() {
   // reportScroll (posizioni per run consultati) resta in memoria di sessione
   state.verifsFilter = null;
   state.verifsData = null;
+  state.cycleStats = null;
   state.lastReportRun = null;
   const rc = $("rh-claims");
   if (rc) { rc.hidden = true; rc.textContent = ""; }
@@ -1784,6 +1821,76 @@ function citationCounts(data) {
   return bySource;
 }
 
+/* ── riepilogo per ciclo (dal feed eventi già caricato) ────────────────────
+   Accumula gli eventi per ciclo durante replay/live: cycle_contribution (e
+   cycle_registry se presente) per le evidenze aggiunte, più le fonti viste
+   nel ciclo (nuove/riusi/errori/duplicati). Se il feed non contiene eventi
+   cycle_* il blocco non viene mostrato. I conteggi fonti sono URL distinti. */
+function cycleBucket(cycle) {
+  if (!state.cycleStats) state.cycleStats = new Map();
+  let b = state.cycleStats.get(cycle);
+  if (!b) {
+    b = { registered: false, newUrls: new Set(), reuseUrls: new Set(),
+          errUrls: new Set(), dupUrls: new Set(), evidences: null };
+    state.cycleStats.set(cycle, b);
+  }
+  return b;
+}
+
+function trackCycleEvent(type, cycle, p) {
+  if (!cycle) return;
+  const b = cycleBucket(cycle);
+  if (type === "cycle_contribution" || type === "cycle_registry") {
+    b.registered = true;
+    if (p && p.new_evidences != null) b.evidences = p.new_evidences;
+  } else if (type === "source_fetched") {
+    const u = p.url || "";
+    if (u) (p.reused ? b.reuseUrls : b.newUrls).add(u);
+  } else if (type === "source_failed") {
+    if (p.url) b.errUrls.add(p.url);
+  } else if (type === "source_duplicate") {
+    if (p.url) b.dupUrls.add(p.url);
+  } else {
+    return;
+  }
+  updateCycleBlock();
+}
+
+/* righe del blocco "Per ciclo"; "" se nessun evento cycle_* nel feed */
+function cycleBreakdownInner() {
+  if (!state.cycleStats) return "";
+  const cycles = [...state.cycleStats.entries()]
+    .filter(([, b]) => b.registered)
+    .sort((a, b) => a[0] - b[0]);
+  if (!cycles.length) return "";
+  const rows = cycles.map(([c, b]) => {
+    const bits = [
+      `<span title="Pagine lette per la prima volta in questo ciclo">` +
+        `<b>${b.newUrls.size}</b> nuove</span>`,
+      `<span title="Pagine già note riusate (cache)">${b.reuseUrls.size} riusi</span>`,
+      `<span title="Lettura fallite in questo ciclo">${b.errUrls.size} errori</span>`,
+    ];
+    if (b.dupUrls.size) {
+      bits.push(`<span title="Duplicati scartati (stesso contenuto di una fonte già acquisita)">${b.dupUrls.size} duplicati</span>`);
+    }
+    bits.push(`<span title="Evidenze aggiunte nel ciclo (evento cycle_contribution)">` +
+      (b.evidences != null ? `<b>+${b.evidences}</b> evidenze` : `evidenze n/d`) +
+      `</span>`);
+    return `<div class="pc-row mono"><span class="pc-c">ciclo ${c}</span>` +
+      bits.join("") + `</div>`;
+  }).join("");
+  return `<div class="pc-title">Per ciclo` +
+    `<span class="faint"> dal feed eventi: fonti nuove/riusi/errori ed evidenze aggiunte</span></div>` + rows;
+}
+
+function updateCycleBlock() {
+  const el = $("src-per-cycle");
+  if (!el) return;   // vista Fonti non ancora renderizzata: solo accumulo
+  const inner = cycleBreakdownInner();
+  el.innerHTML = inner;
+  el.hidden = !inner;
+}
+
 function renderSourcesView(data) {
   const box = $("view-sources");
   if (!box) return;
@@ -1802,17 +1909,29 @@ function renderSourcesView(data) {
       dup: !!(s.content_hash && hashCount[s.content_hash] > 1),
     };
   });
-  const lette = state.srcRows.filter((r) =>
-    r.s.fetch_status === "SUCCESS" || r.s.fetch_status === "PARTIAL_CONTENT").length;
+  const isRead = (r) => r.s.fetch_status === "SUCCESS" ||
+    r.s.fetch_status === "PARTIAL_CONTENT";
+  const isFailed = (r) => r.s.fetch_status === "FETCH_FAILED" ||
+    r.s.fetch_status === "EXTRACTION_FAILED" || !!r.s.error;
+  const tot = state.srcRows.length;
+  const lette = state.srcRows.filter(isRead).length;
+  const fallite = state.srcRows.filter(isFailed).length;
+  const duplicati = state.srcRows.filter((r) => r.dup).length;
   const citate = state.srcRows.filter((r) => r.cites > 0).length;
   box.innerHTML =
     `<div class="rview-bar">` +
-    `<span class="src-counters mono" title="Fonti trovate / lette / citate nel report">` +
-    `trovate <b>${(data.sources || []).length}</b> · lette <b>${lette}</b> · citate <b>${citate}</b></span>` +
+    `<span class="src-counters mono">` +
+    `<span title="Tutte le fonti trovate nel run: ogni riga, incluse fallite e duplicati">trovate <b>${tot}</b></span>` +
+    `<span title="Scaricate e lette con successo — stesso criterio del contatore 'fonti' della statusbar">lette <b>${lette}</b></span>` +
+    `<span title="Non lette: errore di fetch o di estrazione">fallite <b>${fallite}</b></span>` +
+    `<span title="Stesso contenuto di un'altra fonte già acquisita nel run">duplicati <b>${duplicati}</b></span>` +
+    `<span title="Citata almeno una volta nel report finale">citata <b>${citate}</b></span></span>` +
     `<input id="src-filter" type="search" placeholder="filtra fonti…" autocomplete="off" ` +
     `aria-label="Filtra le fonti"></div>` +
+    `<div id="src-per-cycle" class="src-per-cycle" hidden></div>` +
     `<ul id="src-list" class="src-list"></ul>`;
   renderSrcList("");
+  updateCycleBlock();
   const f = $("src-filter");
   if (f) f.addEventListener("input", (e) => renderSrcList(e.target.value));
 }
@@ -1825,15 +1944,24 @@ function renderSrcList(q) {
     `${s.title || ""} ${s.url || ""} ${s.domain || ""}`.toLowerCase().includes(q));
   ul.innerHTML = rows.map(({ s, cites, nums, dup }) => {
     const url = s.url_final || s.url || "";
+    // badge di stato per riga: letta (ok) / fallita (errore) / duplicata
+    let stBadge = "";
+    if (s.fetch_status) {
+      const okSt = s.fetch_status === "SUCCESS" ||
+        s.fetch_status === "PARTIAL_CONTENT";
+      stBadge = `<span class="badge ${okSt ? "st-ok" : "st-bad"}" ` +
+        `title="Stato di acquisizione: ${escapeHtml(s.fetch_status)}">` +
+        `${escapeHtml(FETCH_IT[s.fetch_status] || s.fetch_status)}</span>`;
+    }
     const bits = [];
     if (s.source_type) bits.push(`tipo ${escapeHtml(s.source_type)}`);
-    if (s.fetch_status) bits.push(escapeHtml(FETCH_IT[s.fetch_status] || s.fetch_status));
-    else if (s.http_status) bits.push(`http ${s.http_status}`);
+    if (!s.fetch_status && s.http_status) bits.push(`http ${s.http_status}`);
     if (s.published_at) bits.push(escapeHtml(String(s.published_at).slice(0, 10)));
     return `<li>` +
       `<div class="src-line"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">` +
       `${escapeHtml(s.title || url)}</a>` +
-      (dup ? '<span class="badge neutral" title="Contenuto duplicato di un\'altra fonte nel run">duplicato</span>' : "") +
+      stBadge +
+      (dup ? '<span class="badge neutral" title="Contenuto duplicato di un\'altra fonte nel run">duplicata</span>' : "") +
       `</div>` +
       `<div class="src-meta">` +
       (s.domain ? `<span>${escapeHtml(s.domain)}</span>` : "") +
@@ -1888,6 +2016,8 @@ function renderVerifsView(data) {
   for (const v of rows) {
     const c = claimsById.get(v.claim_id);
     const { support, rest } = parseSupport(v.reason);
+    const cause = parseCause(v.reason);
+    const restTxt = stripCauseToken(rest);
     const n = c ? (c.final_citation_no ?? c.citation_no) : null;
     const evs = c ? (c.evidence_ids || []).map((id) => evById.get(id)).filter(Boolean) : [];
     let evHtml = "";
@@ -1911,10 +2041,14 @@ function renderVerifsView(data) {
       `<div class="verif-head"><span class="verdict ${escapeHtml(v.verdict)}">` +
       `${escapeHtml(v.verdict)}</span>` +
       (support ? `<span class="sup sup-${support}" title="${SUPPORT_IT[support]}: ${SUPPORT_HELP[support]}">${SUPPORT_IT[support]}</span>` : "") +
+      (cause ? `<span class="sup sup-cause" title="Causa dichiarata nel motivo [cause:${cause}]">${escapeHtml(CAUSE_IT[cause] || cause)}</span>` : "") +
       presence +
       `</div>` +
       `<div class="verif-text">${escapeHtml((c && c.text) || "(claim rimosso dal report)")}</div>` +
-      (rest ? `<div class="cr">${escapeHtml(rest.slice(0, 220))}</div>` : "") +
+      (restTxt ? `<div class="cr">${escapeHtml(restTxt.slice(0, 220))}</div>` : "") +
+      (cause && CAUSE_ACTION[cause]
+        ? `<div class="cause-next" title="Prossima azione possibile per questa causa">prossima azione: ${escapeHtml(CAUSE_ACTION[cause])}</div>`
+        : "") +
       (evHtml ? `<div class="verif-foot">${evHtml}</div>` : "") +
       `</li>`);
   }

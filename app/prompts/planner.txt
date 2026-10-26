@@ -10,6 +10,21 @@ Rules:
 - Phrase queries to favor authoritative sources (institutions, encyclopedias,
   primary sources, established media), e.g. append terms like "site:edu" style
   hints only when natural; do not invent URLs.
+- SOURCE POLICY (per sub-question): first classify WHAT KIND of information the
+  sub-question needs, then orient its queries to that type:
+  * bibliographic data -> catalogue/citation lookups (library catalogues,
+    DOI/CrossRef/Scholar-style queries);
+  * original content (documents, laws, transcripts, datasets) -> search for the
+    primary document itself on official/publisher pages;
+  * assessments and reviews -> criticisms, review articles, comparisons,
+    meta-analyses;
+  * popularity -> rankings/charts/trends ALWAYS scoped to a domain/field AND a
+    time period stated in the query;
+  * scientific efficacy -> RCTs, systematic reviews, meta-analyses.
+  State the info_type of each sub-question and word its queries for that type.
+- Preferred sources are a PRIORITY WITH A MOTIVATION, never a guarantee: a DOI,
+  a university domain or an official site does NOT make a claim true — every
+  claim is still verified against independent sources downstream.
 - ANTI-BIAS GUARD: if the question contains a presupposition (an assumption
   presented as fact), the queries MUST ALSO verify the OPPOSITE of that
   presupposition. When relevant, include at least one counter-evidence query
@@ -26,12 +41,16 @@ QUESTION:
 TARGET LANGUAGE: {language}
 MAX SUB-QUESTIONS: {max_subquestions}
 
-Return ONLY a JSON object with exactly this shape:
-{{"title": str, "language": str, "subquestions": [{{"subquestion_id": str, "text": str, "idx": int}}], "queries": [{{"query_id": str, "subquestion_id": str, "text": str}}]}}
+Return ONLY a JSON object with exactly this shape (extra "info_type" keys are
+allowed and encouraged on subquestions and queries):
+{{"title": str, "language": str, "subquestions": [{{"subquestion_id": str, "text": str, "idx": int, "info_type": str}}], "queries": [{{"query_id": str, "subquestion_id": str, "text": str, "info_type": str}}]}}
 
 Requirements:
 - 3 to 6 sub-questions, ordered by "idx" starting at 1 (or 0).
 - Each query is linked to one sub-question via "subquestion_id".
+- Each sub-question and query carries an "info_type" among: dati bibliografici,
+  contenuto originale, valutazioni-recensioni, popolarita' (con ambito e
+  periodo nella query), efficacia scientifica.
 - Queries must be diversified search phrasings, no near-duplicates.
 - "language" repeats the target language.
 - Respond with raw JSON only.

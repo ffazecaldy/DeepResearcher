@@ -24,6 +24,22 @@ _ANTIBIAS_RULE = (
     "presupposto. Quando pertinente, includi almeno una query di "
     "controevidenza che cerchi attivamente fonti che lo smentiscano.")
 
+# Politica delle fonti: tipo di informazione per sotto-domanda -> query orientate
+# al tipo; fonti preferite come priorita' MOTIVATA, senza garanzia automatica.
+_SOURCE_POLICY_RULE = (
+    "POLITICA DELLE FONTI: per ogni sotto-domanda identifica prima il TIPO di "
+    "informazione necessaria (dati bibliografici / contenuto originale / "
+    "valutazioni-recensioni / popolarita' con ambito e periodo / efficacia "
+    "scientifica) e orienta le sue query a quel tipo: bibliografico -> "
+    "cataloghi e lookup DOI/CrossRef/Scholar; contenuto originale -> il "
+    "documento primario su pagine ufficiali o dell'editore; valutazioni -> "
+    "critiche, review, confronti, meta-analisi; popolarita' -> classifiche e "
+    "trend SEMPRE con ambito/settore e periodo espliciti nella query; "
+    "efficacia scientifica -> RCT, revisioni sistematiche, meta-analisi. Le "
+    "fonti preferite sono una PRIORITA' MOTIVATA dal tipo, NON una garanzia: "
+    "un DOI, un dominio universitario o un sito ufficiale non rendono vera "
+    "un'affermazione — la verifica resta alla pipeline su fonti indipendenti.")
+
 
 class PlannerError(RuntimeError):
     """The planner could not obtain a valid plan JSON after the repair retry."""
@@ -128,7 +144,7 @@ class Planner:
                                max_subquestions=max_subquestions)
         # rinforzo esplicito della guardia nel prompt: vive nel prompt.txt ma
         # qui e' garantita a prescindere dal template in uso (ciclo 1 only)
-        user = f"{user}\n\n{_ANTIBIAS_RULE}"
+        user = f"{user}\n\n{_ANTIBIAS_RULE}\n\n{_SOURCE_POLICY_RULE}"
 
         raw = await self._llm.complete(system_tpl, user, force_json=True)
         data = None

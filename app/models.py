@@ -154,6 +154,10 @@ class ReportClaim(BaseModel):
     verdict_reason: str | None = None
     corrected_text: str | None = None
     final_citation_no: int | None = None  # P0-2: numero uniforme post-verifica
+    # PROPORZIONE: writer ha indebolito la formulazione rispetto alle fonti
+    # per proporzionare la conclusione alle evidenze. Facoltativo nel JSON del
+    # writer; assenza = False (nessuna modifica allo schema esistente).
+    hedged: bool = False
 
 
 class DraftReport(BaseModel):
