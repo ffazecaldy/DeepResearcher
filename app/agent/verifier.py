@@ -51,6 +51,106 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 _CITE_TOKEN = re.compile(r"\[\d+\]")
 _TRAILING_PUNCT = re.compile(r"[.!?…]+")
 
+# ---- guardie deterministiche a valle (P0-4) --------------------------------
+# Il verifier LLM controlla numeri e contraddizioni, NON lo scope: senza queste
+# regole in codice un claim che allarga la popolazione ("benefici
+# sull'attenzione" da una quote su "bambini con ADHD") passava VERIFIED, e un
+# fatto forte citato da una fonte divulgativa passava senza attribuzione.
+# Tipi di fonte PRIMARI (allineati a gap_checker.PRIMARY_SOURCE_TYPES e alle
+# opzioni della decisione source_type dell'orchestrator): tutto il resto
+# (news/forum/other/...) e' SECONDARIO. source_type ignoto -> non blocca.
+_PRIMARY_SOURCE_TYPES = {"official", "paper", "primaria", "primary",
+                         "studio", "ufficiale"}
+# fatto scientifico FORTE: stem it/en; una fonte secondaria da sola non puo'
+# sostenere questi verbi (serve attribuzione "secondo la fonte")
+_STRONG_FACT_RE = re.compile(
+    r"dimostr|prova che|provi che|scientificament|scientifically|demonstrat|"
+    r"proves that|proven that|conclusivament", re.IGNORECASE)
+# meta-affermazioni sullo STATO delle evidenze: ammesse solo se il reason
+# cita evidenze concrete in conflitto/concordi (altrimenti e' il bug
+# "dichiarare evidenze contrastanti senza base")
+_META_CLAIM_RE = re.compile(
+    r"contrastant|contraddittor|contraddic|discord|concord|converg|coerent|"
+    r"diverg", re.IGNORECASE)
+_META_STOPWORDS = {
+    "il", "lo", "la", "i", "gli", "le", "un", "uno", "una", "di", "del",
+    "della", "dello", "dei", "delle", "degli", "e", "ed", "o", "in", "su",
+    "per", "con", "tra", "fra", "che", "si", "non", "al", "allo", "alla",
+    "ai", "agli", "alle", "da", "dal", "the", "of", "a", "an", "and", "on",
+    "to", "is", "are", "that", "this", "it", "as", "be", "by", "with",
+    "for", "at", "was", "were",
+}
+
+
+def _has_primary_source(evidence_ids: list[str],
+                        ev_map: dict[str, Evidence]) -> bool:
+    for eid in evidence_ids:
+        st = (getattr(ev_map.get(eid), "source_type", None) or "").strip().lower()
+        if st in _PRIMARY_SOURCE_TYPES:
+            return True
+    return False
+
+
+def _has_secondary_source(evidence_ids: list[str],
+                          ev_map: dict[str, Evidence]) -> bool:
+    for eid in evidence_ids:
+        ev = ev_map.get(eid)
+        st = (getattr(ev, "source_type", None) or "").strip().lower()
+        if ev is not None and st and st not in _PRIMARY_SOURCE_TYPES:
+            return True
+    return False
+
+
+def _population_scope_gap(claim_text: str, evidence_ids: list[str],
+                          ev_map: dict[str, Evidence]) -> set[str]:
+    """Classi di popolazione dichiarate dalle evidenze e del tutto assenti
+    dal claim (euristica deterministica, lista EDITABILE in
+    reader.POPULATION_CLASSES). Restringere la popolazione e' lecito: il gap
+    esiste solo quando il claim non mantiene NESSUNA classe citata."""
+    from app.agent.reader import population_groups  # euristica condivisa
+    required: set[str] = set()
+    for eid in evidence_ids:
+        ev = ev_map.get(eid)
+        if ev is not None:
+            required |= population_groups(f"{ev.quote} {ev.claim}")
+    if not required:
+        return set()
+    present = population_groups(claim_text)
+    return required if not (present & required) else set()
+
+
+def _words(s: str) -> list[str]:
+    return re.findall(r"\w+", s.lower(), re.UNICODE)
+
+
+def _reason_cites_evidence(reason: str, evidence_ids: list[str],
+                           ev_map: dict[str, Evidence]) -> bool:
+    """Il reason riferisce evidenze CONCRETE (id citato, oppure n-gramma di
+    contenuto ripreso dal claim/quote di un'evidenza citata)? Serve a
+    bloccare le meta-affermazioni vuote ("le evidenze sono contrastanti")
+    senza base: l'id delle evidenze e' nel prompt, il reason deve usarlo o
+    riportarne il contenuto."""
+    rl = reason.lower()
+    for eid in evidence_ids:
+        if eid.lower() in rl:
+            return True
+    r_words = _words(reason)
+    r_grams = {" ".join(r_words[i:i + 3]) for i in range(len(r_words) - 2)}
+    if not r_grams:
+        return False
+    for eid in evidence_ids:
+        ev = ev_map.get(eid)
+        if ev is None:
+            continue
+        for src in (ev.claim, ev.quote):
+            w = _words(src)
+            for i in range(len(w) - 2):
+                gram = " ".join(w[i:i + 3])
+                if (gram in r_grams
+                        and not all(t in _META_STOPWORDS for t in gram.split())):
+                    return True
+    return False
+
 
 class _InvalidOutputError(ValueError):
     """Output del verifier LLM non utilizzabile (JSON o verdict invalido)."""
@@ -232,6 +332,20 @@ class Verifier:
     degrada a WEAKENED (rendere piu' vaga una frase non la rende supportata).
     Se la seconda verifica non e' eseguibile (errore tecnico) resta valido il
     CORRECTED della prima verifica.
+
+    Guardie deterministiche a valle (P0-4, dopo l'esito LLM; il prefisso
+    [support:X] resta INVARIATO, la causa va in tassonomia):
+    1. POPOLAZIONE: evidenze con popolazione esplicita (reader.POPULATION_
+       CLASSES: adhd, bambini, pazienti, ...) e claim che non ne mantiene
+       NESSUNA -> WEAKENED [cause:overstated] (restringere e' lecito,
+       genericizzare no).
+    2. ATTRIBUZIONE: fatto scientifico forte ("dimostra", "prova che", ...)
+       sostenuto SOLO da fonti non primarie (source_type news/forum/other;
+       primarie: official/paper) -> verdict massimo WEAKENED, reason
+       "fonte secondaria: richiede attribuzione".
+    3. META-CLAIMS: claim sullo STATO delle evidenze ("contrastanti",
+       "concordano") il cui reason non cita evidenze concrete ->
+       WEAKENED "meta-affermazione non supportata".
     """
     def __init__(self, llm, prompts_dir: Path | None = None,
                  max_concurrency: int = 3):
@@ -478,6 +592,65 @@ class Verifier:
                     # affermazione, un VERIFIED non e' credibile -> WEAKENED
                     verdict, reason = "WEAKENED", _SUPPORT_REASON
                     cause = cause or _default_cause(support, verdict, None)
+                # -- guardie deterministiche a valle (P0-4): l'LLM controlla
+                # numeri e contraddizioni, NON lo scope. Il prefisso [support:X]
+                # resta INVARIATO (descrive le evidenze, non il verdetto); la
+                # causa e' in tassonomia ([cause:overstated]).
+                if verdict == "VERIFIED":
+                    gap = _population_scope_gap(claim.text, claim.evidence_ids,
+                                                ev_map)
+                    if gap:
+                        # (a) POPOLAZIONE: evidenze con popolazione esplicita
+                        # (es. "bambini/adolescenti ADHD"), claim generico che
+                        # la omette del tutto -> scope allargato -> WEAKENED
+                        log.info("verifier: guardia popolazione su %s: "
+                                 "popolazioni %s presenti nelle evidenze e "
+                                 "omesse dal claim", claim.claim_id,
+                                 ", ".join(sorted(gap)))
+                        verdict = "WEAKENED"
+                        reason = ("claim generico: le evidenze dichiarano la "
+                                  "popolazione (" + ", ".join(sorted(gap))
+                                  + ") che il claim omette del tutto: scope "
+                                  "allargato" + (f"; {reason}" if reason else ""))
+                        cause = "overstated"
+                if verdict in ("VERIFIED", "CORRECTED"):
+                    published = (corrected if verdict == "CORRECTED"
+                                 and (corrected or "").strip() else claim.text)
+                    if (_STRONG_FACT_RE.search(published)
+                            and _has_secondary_source(
+                                claim.evidence_ids, ev_map)
+                            and not _has_primary_source(
+                                claim.evidence_ids, ev_map)):
+                        # (b) ATTRIBUZIONE: fatto scientifico forte ("dimostra",
+                        # "prova che", ...) sostenuto SOLO da fonti secondarie
+                        # (news/forum/other) -> verdict massimo WEAKENED, il
+                        # writer formulera' con l'attribuzione alla fonte
+                        log.info("verifier: guardia attribuzione su %s: "
+                                 "fatto forte su fonte non primaria",
+                                 claim.claim_id)
+                        verdict = "WEAKENED"
+                        corrected = None
+                        reason = ("fonte secondaria: richiede attribuzione — "
+                                  "fatto scientifico forte non sostenibile da "
+                                  "sole fonti non primarie"
+                                  + (f"; {reason}" if reason else ""))
+                        cause = cause or "overstated"
+                    elif (_META_CLAIM_RE.search(published)
+                          and not _reason_cites_evidence(
+                              reason, claim.evidence_ids, ev_map)):
+                        # (c) META-CLAIMS: il claim descrive lo stato delle
+                        # evidenze ("contrastanti", "concordano") ma il reason
+                        # NON cita nessuna evidenza concreta -> WEAKENED
+                        log.info("verifier: guardia meta-claim su %s: "
+                                 "stato delle evidenze affermato senza "
+                                 "riferimenti concreti", claim.claim_id)
+                        verdict = "WEAKENED"
+                        corrected = None
+                        reason = ("meta-affermazione non supportata: il claim "
+                                  "descrive lo stato delle evidenze senza "
+                                  "citare evidenze concrete in conflitto/"
+                                  "concordi" + (f"; {reason}" if reason else ""))
+                        cause = cause or "overstated"
                 # diagnosi contesto (warning su quote non nel sorgente) + causa
                 # per gli esiti non puliti
                 ctx = "ok"

@@ -143,6 +143,10 @@ class Orchestrator:
                                max_total_pages=self.settings.max_total_pages)
         seen_urls: set[str] = set()  # never re-pick pages already read
         seen_content: set[str] = set()  # B6: content_hash gia' visti nel run
+        # B14: chiavi d'identita' bibliografica (DOI/PMID/PMCID/canonical/url)
+        # gia' viste nel run — PubMed e PMC dello stesso studio hanno testo
+        # estratto diverso (content_hash diverso) ma la stessa identita'
+        seen_identity: set[str] = set()
         effective = self.settings.cycle_budget(depth)
         log.debug(
             "[CYCLES] depth=%s | DR_MAX_CYCLES=%s | preset=%s | EFFETTIVO=%s "
@@ -373,23 +377,45 @@ class Orchestrator:
                     except LimitReached as exc:
                         docs = []
                         limit_note = str(exc)
+                    # B14: solo i documenti NON duplicati arrivano a
+                    # _evaluate_docs e _read_docs (vedi sotto)
+                    docs_new: list = []
                     for doc in docs:
                         self._persist_source(run_id, doc)
                         if doc.fetch_status.value.startswith(("SUCCESS", "PARTIAL")):
-                            # B6/B12: contenuto gia' visto nel run (anche su URL
-                            # diverso) = duplicato: NON si rilegge e NON conta
-                            # come fonte indipendente (10 copie != 10 conferme)
-                            is_dup = (bool(doc.content_hash)
-                                      and doc.content_hash in seen_content)
+                            # B6/B12/B14: contenuto gia' visto nel run (anche su
+                            # URL diverso) o identita' bibliografica gia' vista
+                            # (DOI/PMID/PMCID/canonical uguali, tipico copy
+                            # PubMed<->PMC) = duplicato: NON valutato, NON
+                            # rilegto, NON contato come fonte indipendente
+                            # (10 copie != 10 conferme)
+                            id_keys = self._identity_keys_of(doc)
+                            is_content_dup = (bool(doc.content_hash)
+                                              and doc.content_hash in seen_content)
+                            is_identity_dup = False
+                            if id_keys:
+                                is_identity_dup = any(
+                                    k in seen_identity for k in id_keys)
+                                if not is_identity_dup:
+                                    is_identity_dup = \
+                                        self.storage.identity_seen_any(
+                                            run_id, id_keys,
+                                            exclude_source_id=doc.source_id)
                             if doc.content_hash:
                                 seen_content.add(doc.content_hash)
-                            if is_dup:
+                            seen_identity.update(id_keys)
+                            if is_content_dup or is_identity_dup:
                                 ctx.cycle_acc["duplicates"] += 1
                                 ctx.cycle_acc["duplicate_ids"].add(doc.source_id)
                                 self.emit(ctx, "source_duplicate", cycle,
                                           source_id=doc.source_id,
                                           url=doc.final_url or doc.url,
-                                          content_hash=doc.content_hash)
+                                          content_hash=doc.content_hash,
+                                          identity_key=(id_keys[0]
+                                                        if id_keys else ""),
+                                          dup_reason=("identity"
+                                                      if is_identity_dup
+                                                      else "content"))
                                 continue
                             # registro: URL gia' letto in un ciclo precedente ma
                             # con contenuto nuovo = pagina aggiornata (ri-lettura
@@ -412,11 +438,15 @@ class Orchestrator:
                                       source_id=doc.source_id,
                                       url=doc.final_url or doc.url,
                                       reused=False)
+                            # B14: solo i NON duplicati proseguono verso la
+                            # valutazione (decisions) e la lettura (reader):
+                            # i duplicati restano SOLO come log su storage/eventi
+                            docs_new.append(doc)
                         else:
                             ctx.cycle_acc["fetch_errors"] += 1
                             self.emit(ctx, "source_failed", cycle, source_id=doc.source_id,
                                       url=doc.url, error=doc.error)
-                    accepted = await self._evaluate_docs(run_id, cycle, docs,
+                    accepted = await self._evaluate_docs(run_id, cycle, docs_new,
                                                          question, decisions, ctx)
                     # B4/P1-8: snowballing — link <a href> del RAW HTML delle
                     # pagine accettate (non del testo estratto)
@@ -596,6 +626,15 @@ class Orchestrator:
                           note="Il bot sta ricontrollando ogni frase sulle fonti")
                 ev_map = {e.evidence_id: e for e in evidences}
                 src_map = {d.source_id: d for d in accepted_docs}
+                # P0-4 (attribuzione): il verifier distingue fonti primarie/
+                # secondarie via evidence.source_type — la classificazione e'
+                # decisa da _evaluate_docs e persistita su sources; models.py
+                # e' congelato, si propaga sul campo GIA' presente su Evidence
+                st_by_src = {r["id"]: (r.get("source_type") or "")
+                             for r in self.storage.sources_for_run(run_id)}
+                for e in evidences:
+                    if not e.source_type:
+                        e.source_type = st_by_src.get(e.source_id) or None
                 verified = await self.verifier.verify(question, draft, ev_map, src_map)
                 for c in verified.claims:
                     self.storage.add_verification(run_id, c.claim_id,
@@ -740,7 +779,16 @@ class Orchestrator:
             doc.source_id, run_id, doc.url, doc.final_url, doc.domain, doc.title,
             doc.http_status, doc.content_type, doc.fetch_status.value,
             doc.published_at, doc.author, doc.redirects, doc.error, doc.byte_len,
-            content_hash=getattr(doc, "content_hash", ""))
+            content_hash=getattr(doc, "content_hash", ""),
+            identity_key=getattr(doc, "identity_key", ""))
+
+    def _identity_keys_of(self, doc) -> list[str]:
+        """Chiavi d'identita' bibliografica del doc (convenzione fetcher:
+        attributi dinamici identity_key/identity_aliases, default vuoti)."""
+        ikey = getattr(doc, "identity_key", "") or ""
+        ialias = [a for a in (getattr(doc, "identity_aliases", None) or [])
+                  if isinstance(a, str) and a]
+        return list(dict.fromkeys([ikey, *ialias])) if ikey else []
 
     async def _evaluate_docs(self, run_id, cycle, docs, question, decisions, ctx):
         """Typed decisions per document: is_relevant + source_type + quality."""
@@ -884,7 +932,8 @@ class Orchestrator:
                     found = await self.reader.extract_evidences(
                         question, sq.text if sq else "", ch,
                         max_evidences=min(4, budget[0]),
-                        subquestion_id=sq.subquestion_id if sq else None)
+                        subquestion_id=sq.subquestion_id if sq else None,
+                        doc_title=doc.title)
                     self.storage.add_chunk(ch)
                     if sq is not None:
                         used_sqs.add(sq.subquestion_id)
@@ -985,7 +1034,8 @@ class Orchestrator:
                     found = await self.reader.extract_evidences(
                         question, sq.text, ch,
                         max_evidences=min(4, budget_box[0]),
-                        subquestion_id=sq.subquestion_id)
+                        subquestion_id=sq.subquestion_id,
+                        doc_title=meta.get("title"))
                     for e in found:
                         e.run_id = ctx.run_id
                         self.storage.add_evidence(e)

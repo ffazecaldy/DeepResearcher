@@ -210,4 +210,5 @@ def test_writer_strips_double_h1(tmp_path):
                   quote="q", claim="c", run_id="r")
     draft = asyncio.run(w.write("domanda", "it", [], [ev]))
     assert not re.match(r"^\s*#\s+", draft.markdown)  # niente H1 nel body
-    assert draft.markdown == "Testo italiano."
+    # P0-2b: il claim senza marker nel testo riceve [1] a fine frase
+    assert draft.markdown == "Testo italiano [1]."

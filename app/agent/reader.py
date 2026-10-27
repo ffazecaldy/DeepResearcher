@@ -23,6 +23,55 @@ _QUOTE_MAP = {
     "\u2013": "-", "\u2014": "-", "\u2212": "-",
 }
 
+# ---- guardie deterministiche del reader (quote di sostanza) ----------------
+# La quote deve avere SOSTANZA: il caso peggiore osservato e' la LLM che,
+# trovata una pagina senza contenuto utile, cita SOLO IL TITOLO e il claim
+# poi allarga lo scope. Euristica editabile qui sotto.
+_MIN_TITLE_QUOTE_CHARS = 80
+# verbi finiti comuni it/en (stemi): una quote senza nessuno di questi, breve
+# e isolata su una riga, e' quasi certamente un titolo/intestazione
+_TITLE_VERB_RE = re.compile(
+    r"\b(\u00e8|e'|sono|era|erano|ha|hanno|aveva|fu|furono|fa|fanno|pu\u00f2|"
+    r"deve|devono|viene|vengono|and|was|were|is|are|be|been|has|have|had|"
+    r"can|could|may|might|will|would|show|shows|showed|reduce|reduces|"
+    r"improve|improves|improved|increase|increases|cause|causes|found|"
+    r"suggest|suggests|report|reports|says|state|states|brevett\u00f2|"
+    r"disse|ricorda|avvenne)\b")
+# classi di popolazione/condizione: se la quote ne cita una e il claim non
+# ne cita NESSUNA STESSA CLASSE, il claim ha allargato la popolazione ->
+# evidenza scartata (il claim generico "sull'attenzione" da una quote su
+# "bambini con ADHD" e' esattamente il bug da bloccare). Stem con matching
+# a inizio-parola: "bambin" copre bambino/bambini; lista EDITABILE.
+POPULATION_CLASSES: dict[str, tuple[str, ...]] = {
+    "adhd": ("adhd",),
+    "bambini": ("bambin", "child", "kid", "pediatric", "paediatric", "infanz"),
+    "adolescenti": ("adolescen", "teen", "puber"),
+    "pazienti": ("pazient", "patient"),
+    "anziani": ("anzian", "elderly", "elder", "geriatric", "older"),
+    "diabetici": ("diabet",),
+    "donne": ("donn", "women", "woman", "femal", "gravid", "pregnan"),
+    "uomini": ("uomin", r"men\b", "maschil", r"\bmale\b"),
+    "adulti": ("adult",),
+    "soggetti": ("soggett", "subject", "participan", "partecipan",
+                 "volunteer", "volontar", "cohort", "coorte"),
+    "studenti": ("studen",),
+}
+# NB: nessuna classe "popolazione"/"sample": parole come "popolazione dello
+# studio" sono boilerplate, non un gruppo demografico — includerle farebbe
+# scartare quote sane. La lista copre SOLO popolazioni/condizioni concrete.
+_POPULATION_RES = {g: tuple(re.compile(r"\b" + s) for s in stems)
+                   for g, stems in POPULATION_CLASSES.items()}
+
+
+def population_groups(text: str) -> set[str]:
+    """Classi di popolazione esplicitamente presenti nel testo (euristica)."""
+    t = text.lower()
+    found: set[str] = set()
+    for group, patterns in _POPULATION_RES.items():
+        if any(p.search(t) for p in patterns):
+            found.add(group)
+    return found
+
 
 def _load_template(prompts_dir: Path, name: str) -> tuple[str, str]:
     raw = (prompts_dir / name).read_text(encoding="utf-8")
@@ -113,6 +162,37 @@ def _find_span(quote: str, chunk_text: str) -> tuple[int, int] | None:
     return start, idxs[end_off] + 1
 
 
+def _is_title_like(quote: str, standalone_line: bool,
+                   doc_title: str | None = None) -> str | None:
+    """Ritorna il MOTIVO dello scarto se la quote e' solo-titolo, None altrimenti.
+
+    Segnali (qualunque trigger basta): coincide con il titolo del documento;
+    oppure e' una riga isolata nel testo, breve (< _MIN_TITLE_QUOTE_CHARS),
+    senza punteggiatura finale o senza verbo. Le quote brevi MA incorporate
+    in una frase del chunk (es. una data dentro una frase piena) restano
+    valide: il problema da bloccare e' la pagina di cui si cita solo il titolo.
+    """
+    q = quote.strip()
+    if doc_title and _normalize_text(q) == _normalize_text(doc_title):
+        return "coincide con il titolo del documento"
+    if standalone_line and len(q) < _MIN_TITLE_QUOTE_CHARS:
+        if not re.search(r"[.!?…]\s*$", q):
+            return (f"breve ({len(q)}<{_MIN_TITLE_QUOTE_CHARS}), isolata e "
+                    "senza punteggiatura finale: apparente titolo/intestazione")
+        if not _TITLE_VERB_RE.search(q.lower()):
+            return (f"breve ({len(q)}<{_MIN_TITLE_QUOTE_CHARS}), isolata e "
+                    "senza verbo: apparente titolo/intestazione")
+    return None
+
+
+def _span_is_standalone_line(text: str, start: int, end: int) -> bool:
+    """True se lo span occupa interamente la/e sue righe nel chunk: i titoli
+    stanno da soli, le quote vere sono incastonate in frasi piu' lunghe."""
+    before_ok = start == 0 or text[start - 1] in "\n\r"
+    after_ok = end >= len(text) or text[end] in "\n\r"
+    return before_ok and after_ok
+
+
 class Reader:
     def __init__(self, llm, prompts_dir: Path | None = None):
         self._llm = llm
@@ -120,9 +200,16 @@ class Reader:
 
     async def extract_evidences(self, question: str, subquestion_text: str,
                                 chunk: Chunk, max_evidences: int = 5,
-                                subquestion_id: str | None = None) -> list[Evidence]:
+                                subquestion_id: str | None = None,
+                                doc_title: str | None = None) -> list[Evidence]:
         """Extract quotes+claims from one chunk; unverifiable quotes are dropped.
 
+        Guardie deterministiche in codice (oltre al check quote-presente-nel-
+        chunk): (1) quote solo-titolo scartata — una pagina senza contenuto
+        utile non produce evidenze; (2) il claim NON PUO' allargare la
+        popolazione della quote: se la quote cita una popolazione esplicita
+        (adhd, bambini, pazienti, ...) e il claim la omette del tutto, la
+        evidenza e' scartata. Ogni scarto viene loggato con il motivo.
         LLM/JSON failures log a warning and return [] instead of raising.
         """
         try:
@@ -173,6 +260,28 @@ class Reader:
             if span is None:
                 log.debug("reader: dropped unverifiable quote on chunk %s: %r",
                           chunk.chunk_id, quote[:80])
+                continue
+            # guardia 1: quote solo-titolo (nessuna sostanza) -> scarto loggato
+            title_reason = _is_title_like(
+                quote, _span_is_standalone_line(chunk.text, span[0], span[1]),
+                doc_title)
+            if title_reason:
+                log.info("reader: scartata quote-titolo su chunk %s (%s): %r",
+                         chunk.chunk_id, title_reason, quote[:80])
+                continue
+            # guardia 2: scope — il claim non puo' allargare la popolazione
+            # della quote: se la quote cita popolazioni esplicite e il claim
+            # non ne mantiene NESSUNA, il claim e' genericizzato -> scarto
+            # (restringere la popolazione e' lecito: hedge, non widening)
+            quote_pop = population_groups(chunk.text[span[0]:span[1]])
+            claim_pop = population_groups(claim)
+            if quote_pop and not claim_pop:
+                log.info(
+                    "reader: scartata evidenza su chunk %s: il claim allarga "
+                    "la popolazione della quote (%s citati nella quote, "
+                    "nessuno nel claim): quote=%r claim=%r",
+                    chunk.chunk_id, ", ".join(sorted(quote_pop)), quote[:80],
+                    claim[:80])
                 continue
             evidences.append(Evidence(
                 source_id=chunk.source_id,

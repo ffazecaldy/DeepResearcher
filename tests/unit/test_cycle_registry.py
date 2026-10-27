@@ -270,13 +270,16 @@ async def test_cycle_registry_counts_over_two_cycles(tmp_path):
     assert r2["acquired_new"] == 1           # extra
     assert r2["fetch_errors"] == 0
     assert r2["new_vs_previous"] == 1        # solo il contenuto di extra
-    assert r2["docs_with_evidence"] == 2     # mirror e extra prodotti evidenze
-    # nel registro di lettura il duplicato e' marcato
-    dup_rows = [e for e in r2["reading"] if e["source_id"] == "src_mirror"]
-    assert dup_rows and dup_rows[0]["duplicate"] is True
+    # B14: il duplicato NON viene piu' valutato ne' letto: l'unica fonte con
+    # evidenze del ciclo 2 e' extra (prima il mirror veniva letto comunque)
+    assert r2["docs_with_evidence"] == 1
+    assert not any(e["source_id"] == "src_mirror" for e in r2["reading"])
+    assert all(e["duplicate"] is False for e in r2["reading"])
     assert "1 duplicati di contenuto" in r2["pages_limit_origin"]
-    # copertura avanzata: sq1 ora coperta (2 domini), sq2 parziale
-    assert "coperta" in r2["gap_status"].values()
+    # copertura: senza il mirror, sq1 resta su un solo dominio (parziale) —
+    # le copie dello stesso contenuto non contano piu' come conferme
+    assert "coperta" not in r2["gap_status"].values()
+    assert "parziale" in r2["gap_status"].values()
 
     # ---- persistenza nelle stats (runs.limits_json, chiave "cycles") ----
     saved = json.loads(storage.get_run(run_id)["limits_json"])
@@ -299,7 +302,8 @@ async def test_read_docs_group_budget_warning(tmp_path, caplog):
             self.calls = 0
 
         async def extract_evidences(self, question, subquestion_text, chunk,
-                                    max_evidences=4, subquestion_id=None):
+                                    max_evidences=4, subquestion_id=None,
+                                    doc_title=None):
             self.calls += 1
             from app.models import Evidence
             return [Evidence(source_id=chunk.source_id, chunk_id=chunk.chunk_id,
@@ -348,7 +352,8 @@ async def test_read_docs_group_zero_evidence_warning(tmp_path, caplog):
 
     class EmptyReader:
         async def extract_evidences(self, question, subquestion_text, chunk,
-                                    max_evidences=4, subquestion_id=None):
+                                    max_evidences=4, subquestion_id=None,
+                                    doc_title=None):
             return []
 
     settings = Settings(db_path=tmp_path / "e.db", cache_dir=tmp_path / "ec",

@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS sources(
   id TEXT PRIMARY KEY, run_id TEXT NOT NULL, url TEXT, url_final TEXT, domain TEXT,
   title TEXT, http_status INTEGER, content_type TEXT, fetch_status TEXT,
   published_at TEXT, author TEXT, redirects_json TEXT, error TEXT, byte_len INTEGER,
-  content_hash TEXT DEFAULT '', source_type TEXT, quality_score INTEGER,
+  content_hash TEXT DEFAULT '', identity_key TEXT DEFAULT '',
+  source_type TEXT, quality_score INTEGER,
   relevance REAL, accepted INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS chunks(
@@ -103,6 +104,9 @@ class Storage:
         if "content_hash" not in src_cols:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN content_hash TEXT DEFAULT ''")
+        if "identity_key" not in src_cols:
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN identity_key TEXT DEFAULT ''")
         # future migrations go here, each guarded by a PRAGMA table_info check
 
     def close(self) -> None:
@@ -191,15 +195,15 @@ class Storage:
                    domain: str, title: str, http_status: int | None, content_type: str,
                    fetch_status: str, published_at: str | None, author: str | None,
                    redirects: list[str], error: str | None, byte_len: int,
-                   content_hash: str = "") -> None:
+                   content_hash: str = "", identity_key: str = "") -> None:
         self._exec(
             "INSERT INTO sources(id, run_id, url, url_final, domain, title, http_status,"
             " content_type, fetch_status, published_at, author, redirects_json, error,"
-            " byte_len, content_hash)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " byte_len, content_hash, identity_key)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (source_id, run_id, url, url_final, domain, title, http_status, content_type,
              fetch_status, published_at, author, json.dumps(redirects), error, byte_len,
-             content_hash),
+             content_hash, identity_key),
         )
 
     def content_hash_seen(self, run_id: str, content_hash: str) -> bool:
@@ -212,6 +216,31 @@ class Storage:
             (run_id, content_hash),
         )
         return bool(rows)
+
+    def identity_seen(self, run_id: str, identity_key: str,
+                      exclude_source_id: str | None = None) -> bool:
+        """True se questo run ha gia' una fonte con la stessa identity_key
+        bibliografica (es. copia PMC dello studio PubMed = non indipendente)."""
+        if not identity_key:
+            return False
+        return self.identity_seen_any(run_id, [identity_key],
+                                      exclude_source_id=exclude_source_id)
+
+    def identity_seen_any(self, run_id: str, identity_keys: Iterable[str],
+                          exclude_source_id: str | None = None) -> bool:
+        """Come identity_seen ma per un SET di chiavi (chiave primaria + alias
+        del documento): True se ALMENO una e' gia' presente nel run."""
+        keys = [k for k in identity_keys if k]
+        if not keys:
+            return False
+        sql = (f"SELECT 1 FROM sources WHERE run_id=? AND identity_key IN "
+               f"({','.join('?' * len(keys))})")
+        params: list[Any] = [run_id, *keys]
+        if exclude_source_id:
+            sql += " AND id<>?"
+            params.append(exclude_source_id)
+        sql += " LIMIT 1"
+        return bool(self._query(sql, params))
 
     def update_source_evaluation(self, source_id: str, source_type: str | None,
                                  quality_score: int | None, relevance: float | None,

@@ -1,4 +1,28 @@
-"""Fetcher: concurrent page download with SSRF guard, robots.txt, rate limit, cache."""
+"""Fetcher: concurrent page download with SSRF guard, robots.txt, rate limit, cache.
+
+CONVENZIONE ATTRIBUTI DINAMICI (models.py e' condiviso con altri owner, il
+modello FetchedDocument non si estende): il fetcher calcola e attacca al doc
+tre metadati FUORI schema via ``object.__setattr__`` (pydantic v2 rifiuta
+l'assegnazione normale di campi non dichiarati):
+
+- ``doc.identity_key``: chiave primaria d'identita' bibliografica con
+  priorita' ``doi:... > pmid:... > pmc:... > canon:... > url:...`` (DOI
+  normalizzato lowercase; PMID/PMCID numerici/PMC-id; canonical e URL
+  normalizzati con normalize_for_dedupe). Sempre non-vuota per un fetch ok.
+- ``doc.identity_aliases``: lista di TUTTE le chiavi d'identita' presenti
+  (la primaria in testa). L'orchestrator deduplica se la chiave primaria O
+  una qualsiasi alias e' gia' vista nel run: cosi' la copia PMC di uno studio
+  PubMed collide anche quando solo una delle due pagine porta il DOI.
+- ``doc.published_at_validated``: True solo se ``published_at`` proviene
+  dalla validazione di extract.py (JSON-LD/meta citation_* o candidata
+  plausibile non-bibliografica). ``published_at`` e' data di pubblicazione;
+  la data di RECUPERO resta ``fetched_at``/``created_at`` del doc.
+
+Lettura lato consumatore: SEMPRE ``getattr(doc, "<attr>", default)``.
+Gli attributi non entrano in ``model_dump()``: il roundtrip della cache disco
+li salva esplicitamente (``_to_cache``/``_from_cache``) e l'orchestrator
+li persiste in ``sources.identity_key`` via ``storage.add_source``.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +46,64 @@ log = logging.getLogger(__name__)
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 _HASH_MAX_CHARS = 200_000
+
+# attributi dinamici fuori-schema (vedi docstring modulo)
+_DYNAMIC_META_KEYS = ("identity_key", "identity_aliases",
+                      "published_at_validated")
+_DYNAMIC_DEFAULTS: dict = {"identity_key": "", "identity_aliases": [],
+                           "published_at_validated": False}
+
+
+def set_dynamic_meta(doc: FetchedDocument, key: str, value) -> None:
+    """Attacca un metadato fuori-schema al documento (vedi docstring modulo)."""
+    object.__setattr__(doc, key, value)
+
+
+def ensure_dynamic_meta(doc: FetchedDocument) -> None:
+    """Garantisce che i tre attributi dinamici ESISTANO sempre (default vuoti),
+    cosi' il consumatore puo' fare getattr senza sorprese."""
+    for key, default in _DYNAMIC_DEFAULTS.items():
+        if not hasattr(doc, key):
+            object.__setattr__(doc, key, default)
+
+
+def _norm_url_key(url: str) -> str:
+    from app.security import normalize_for_dedupe
+    if not url:
+        return ""
+    try:
+        return normalize_for_dedupe(url)
+    except Exception:  # noqa: BLE001 - URL patologico: chiave non normalizzata
+        return url.strip()
+
+
+def identity_keys(meta: dict, doc_url: str,
+                  final_url: str = "") -> tuple[str, list[str]]:
+    """(identity_key, identity_aliases) dai campi identita' di extract.py.
+
+    Priorita' DOI > PMID > PMCID > canonical URL > url normalizzato. Le alias
+    contengono TUTTE le chiavi presenti: la dedup per intersezione colla
+    PubMed<->PMC anche quando il DOI e' su una sola delle due pagine.
+    """
+    parts: list[str] = []
+    doi = (meta.get("doi") or "").strip().lower()
+    pmid = (meta.get("pmid") or "").strip()
+    pmcid = (meta.get("pmcid") or "").strip().upper()
+    canon = _norm_url_key(meta.get("canonical_url") or "")
+    base = _norm_url_key(final_url or doc_url or "")
+    if doi:
+        parts.append(f"doi:{doi}")
+    if pmid:
+        parts.append(f"pmid:{pmid}")
+    if pmcid:
+        parts.append(f"pmc:{pmcid}")
+    if canon:
+        parts.append(f"canon:{canon}")
+    if base:
+        parts.append(f"url:{base}")
+    if not parts:
+        return "", []
+    return parts[0], parts
 
 
 def content_fingerprint(text: str) -> str:
@@ -113,22 +195,31 @@ class Fetcher:
         doc = FetchedDocument(**raw)
         # identity belongs to the run, content is cacheable: fresh id per load
         doc.source_id = FetchedDocument(url="").source_id
+        # roundtrip dei metadati dinamici (fuori model_dump, vedi docstring)
+        for key in _DYNAMIC_META_KEYS:
+            if key in raw:
+                object.__setattr__(doc, key, raw[key])
+        ensure_dynamic_meta(doc)
         return doc
 
     def _to_cache(self, doc: FetchedDocument) -> None:
         if doc.fetch_status in (FetchStatus.FETCH_FAILED,):
             return  # transient failures are not cached
         payload = doc.model_copy(update={"text": doc.text[:400_000]})
-        self._cache.set_json("fetch", self._cache_key(doc.url),
-                             payload.model_dump())
+        dump = payload.model_dump()
+        for key in _DYNAMIC_META_KEYS:
+            dump[key] = getattr(doc, key, _DYNAMIC_DEFAULTS[key])
+        self._cache.set_json("fetch", self._cache_key(doc.url), dump)
 
     async def _one(self, item: SearchResultItem, budget: RuntimeBudget | None,
                    on_event=None) -> FetchedDocument:
         try:
             url = self._validate(item.url)
         except Exception as exc:
-            return FetchedDocument(url=item.url, fetch_status=FetchStatus.FETCH_FAILED,
-                                   error=f"unsafe url: {exc}")
+            doc = FetchedDocument(url=item.url, fetch_status=FetchStatus.FETCH_FAILED,
+                                  error=f"unsafe url: {exc}")
+            ensure_dynamic_meta(doc)
+            return doc
         if on_event:
             try:
                 on_event("source_queued", url)
@@ -151,10 +242,14 @@ class Fetcher:
             try:
                 budget.consume_page()
             except LimitReached as exc:
-                return FetchedDocument(url=url, fetch_status=FetchStatus.FETCH_FAILED,
-                                       error=f"not fetched, {exc}")
+                doc = FetchedDocument(url=url, fetch_status=FetchStatus.FETCH_FAILED,
+                                      error=f"not fetched, {exc}")
+                ensure_dynamic_meta(doc)
+                return doc
         async with self._sem:
-            return await self._fetch_and_extract(url)
+            doc = await self._fetch_and_extract(url)
+            ensure_dynamic_meta(doc)
+            return doc
 
     async def _fetch_and_extract(self, url: str) -> FetchedDocument:
         doc = FetchedDocument(url=url)
@@ -197,7 +292,15 @@ class Fetcher:
                     text, meta = extract_html(resp.text, current)
                     doc.title = meta.get("title") or ""
                     doc.author = meta.get("author")
+                    # published_at e' GIA' VALIDATA da extract.py (strutturata
+                    # o plausibile non-bibliografica) oppure None: mai inventata
                     doc.published_at = meta.get("published_at")
+                    set_dynamic_meta(doc, "published_at_validated",
+                                     bool(doc.published_at))
+                    # identita' bibliografica: DOI > PMID/PMCID > canonical > URL
+                    ikey, ialias = identity_keys(meta, url, str(resp.url))
+                    set_dynamic_meta(doc, "identity_key", ikey)
+                    set_dynamic_meta(doc, "identity_aliases", list(ialias))
                     doc.byte_len = len(resp.content)
                     doc.text = text
                     # P1-8: links come from the RAW HTML (<a href>), not from

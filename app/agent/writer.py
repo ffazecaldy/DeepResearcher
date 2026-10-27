@@ -6,11 +6,15 @@ import logging
 import re
 from pathlib import Path
 
+from app.agent.citations import sanitize_brackets
 from app.models import DraftReport, Evidence, ReportClaim, SubQuestion
 
 log = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
+
+# marker di citazione validi: singolo [n] o lista [a, b] (solo numeri interi)
+_MARKER = re.compile(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]")
 
 
 class WriterError(RuntimeError):
@@ -95,6 +99,104 @@ def _strip_malformed_emphasis(markdown: str) -> str:
     return "\n".join(fixed)
 
 
+# ---------------- allineamento citazioni per POSIZIONE (P0-2b) --------------
+
+def _claim_parts(claim_text: str) -> tuple[str, str]:
+    """(testo, punteggiatura finale) della frase del claim."""
+    t = claim_text.strip()
+    m = re.match(r"^(.*?)([.!?…]+)$", t, re.DOTALL)
+    if m:
+        return m.group(1), m.group(2)
+    return t, ""
+
+
+def _find_span(markdown: str, claim_text: str,
+               consumed: list[tuple[int, int]]):
+    """Span della frase del claim nel markdown.
+
+    Logica tipo _claim_span del verifier, implementata localmente e consapevole
+    dei marker: testa letterale + marker [n]/[a, b] (anche a META' frase,
+    variante word-tolerant che non attraversa i ritorni a capo) + punteggiatura
+    finale. Salta i range gia' occupati da altri claim; ritorna None se la
+    frase non si ritrova.
+    """
+    head, punct = _claim_parts(claim_text)
+    if not head.strip():
+        return None
+    tok = r"\[\s*\d+(?:\s*,\s*\d+)*\s*\]"
+    tail_cites = rf"(?: *{tok})*"
+    tail = tail_cites + (re.escape(punct) if punct else "")
+    pats = [re.compile(re.escape(head) + rf"\s*{tail}")]
+    words = [re.escape(w) for w in head.split()]
+    if len(words) > 1:
+        gap = rf"(?:(?: +|(?:{tok}) *))+"
+        pats.append(re.compile(gap.join(words) + tail))
+    for pat in pats:
+        for m in pat.finditer(markdown):
+            if any(m.start() < e and s < m.end() for s, e in consumed):
+                continue
+            return m
+    return None
+
+
+def _rebuild_span(span_text: str, marker: str) -> str:
+    """Span con un UNICO marker, a fine frase (prima della punteggiatura):
+    tutti i marker [n]/[a, b] presenti nello span vengono sostituiti."""
+    t = _MARKER.sub(" ", span_text)
+    t = re.sub(r" {2,}", " ", t).strip()
+    m = re.search(r"[.!?…]+$", t)
+    if m:
+        return f"{t[:m.start()].rstrip()} {marker}{m.group(0)}"
+    return f"{t} {marker}".strip()
+
+
+def _align_citations(markdown: str, claims: list[ReportClaim]) -> str:
+    """POST-WRITE: allineamento marker [n] <-> claims per POSIZIONE.
+
+    Il writer LLM emette marker non allineati ai citation_no del proprio JSON
+    (la frase PVT porta [13] per il claim numero 3), liste [10, 20] e marker
+    malformati con id interni. Prima della verifica:
+    a) sanitizzazione: ogni token parentesi-quadre che NON e' una lista di
+       numeri (prefissi interni ev_/clm_/src_, testo libero) e' rimosso;
+    b) per ogni claim ritrovato nel markdown, il cluster di marker del suo
+       span viene riscritto al citation_no del claim: il numero nel testo e'
+       SEMPRE quello del claim giusto;
+    c) claim senza marker nel testo: se lo span e' trovato il [citation_no]
+       viene aggiunto a fine frase; se lo span NON e' trovato il claim resta
+       senza marker (resta citabile in bibliografia via renumber_citations);
+    d) liste fuori da ogni span: restano solo i numeri di claim esistenti,
+       quelli senza claim vengono rimossi.
+    """
+    md = sanitize_brackets(markdown)
+    valid_nos = {c.citation_no for c in claims}
+    tokens = list(_MARKER.finditer(md))
+    consumed: list[tuple[int, int]] = []
+    edits: list[tuple[int, int, str]] = []
+    for c in claims:
+        m = _find_span(md, c.text, consumed)
+        if m is None:
+            continue  # (c) span non trovato: il claim resta senza marker
+        consumed.append((m.start(), m.end()))
+        edits.append((m.start(), m.end(),
+                      _rebuild_span(md[m.start():m.end()],
+                                    f"[{c.citation_no}]")))
+    # (d) liste fuori da ogni span: numeri senza claim rimossi
+    for t in tokens:
+        nums = [int(x) for x in t.group(1).split(",")]
+        if len(nums) < 2 or any(s <= t.start() < e for s, e in consumed):
+            continue
+        keep = [n for n in nums if n in valid_nos]
+        if keep != nums:
+            rep = "[" + ", ".join(map(str, keep)) + "]" if keep else ""
+            edits.append((t.start(), t.end(), rep))
+    for s, e, rep in sorted(edits, key=lambda x: x[0], reverse=True):
+        md = md[:s] + rep + md[e:]
+    # spazi doppi residui e spazio prima della punteggiatura
+    md = re.sub(r" {2,}", " ", md)
+    md = re.sub(r" ([.,;:])", r"\1", md)
+    return md
+
+
 class Writer:
     def __init__(self, llm, prompts_dir: Path | None = None):
         self._llm = llm
@@ -154,6 +256,10 @@ class Writer:
         markdown = re.sub(r"^\s*#\s+[^\n]+\n+", "", markdown)
         # PROPORZIONE: frasi rese proporzionate senza asterischi grezzi malformati
         markdown = _strip_malformed_emphasis(markdown)
+        # CITAZIONI (P0-2b): marker allineati ai claim per POSIZIONE prima
+        # della verifica (sanitizzazione id interni, liste [a, b], marker
+        # sfasati riscritti al citation_no del claim della stessa frase)
+        markdown = _align_citations(markdown, claims)
         title = str(data.get("title", "")).strip() or question.strip()
         if limit_note:
             markdown += (f"\n\n> Nota: {limit_note}\n")

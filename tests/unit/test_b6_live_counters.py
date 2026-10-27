@@ -22,7 +22,8 @@ class ScriptedReader:
         self.ctx: RunContext | None = None
 
     async def extract_evidences(self, question, subquestion_text, chunk,
-                                max_evidences=4, subquestion_id=None):
+                                max_evidences=4, subquestion_id=None,
+                                doc_title=None):
         self.calls.append((subquestion_text, chunk.chunk_id, chunk.source_id))
         self.stats_at_call.append(self.ctx.stats["evidences"] if self.ctx else -1)
         return [Evidence(source_id=chunk.source_id, chunk_id=chunk.chunk_id,
