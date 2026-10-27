@@ -169,3 +169,66 @@ def test_corrected_claim_uses_corrected_text_span():
     out, claims = renumber_citations(md, [c])
     assert out == "Bell ottenne il brevetto nel 1876. [1]"
     assert claims[0].final_citation_no == 1
+
+
+# -- numerazione PER FONTE (B18): un numero = una fonte -----------------------
+
+def _ev(eid: str, src: str):
+    from app.models import Evidence
+    return Evidence(evidence_id=eid, source_id=src, chunk_id="c",
+                    quote="q", claim="c", run_id="r")
+
+
+def test_same_source_claims_share_one_number():
+    # regressioni [27],[28],[29]: due claim sulla STESSA fonte NON devono
+    # avere numeri diversi: il secondo numero non avrebbe voce in bibliografia
+    md = "Prima affermazione [1]. Seconda affermazione [2]."
+    c1 = _claim("Prima affermazione.", 1)
+    c2 = _claim("Seconda affermazione.", 2)
+    evs = [_ev("ev1", "srcA"), _ev("ev2", "srcA")]
+    out, claims = renumber_citations(md, [c1, c2], evs)
+    by_text = {c.text: c for c in claims}
+    assert by_text["Prima affermazione."].final_citation_no == 1
+    assert by_text["Seconda affermazione."].final_citation_no == 1
+    assert out == "Prima affermazione [1]. Seconda affermazione [1]."
+
+
+def test_multi_source_claim_carries_both_numbers():
+    md = "Affermazione su due fonti [1]."
+    c = _claim("Affermazione su due fonti.", 1)
+    c.evidence_ids = ["ev1", "ev2"]
+    evs = [_ev("ev1", "srcA"), _ev("ev2", "srcB")]
+    out, claims = renumber_citations(md, [c], evs)
+    assert out == "Affermazione su due fonti [1, 2]."
+    assert claims[0].final_citation_no == 1
+
+
+def test_source_numbering_follows_first_citation_order():
+    md = "Claim su B [1]. Claim su A [2]."
+    cb = _claim("Claim su B.", 1)
+    ca = _claim("Claim su A.", 2)
+    evs = [_ev("ev1", "srcB"), _ev("ev2", "srcA")]
+    out, claims = renumber_citations(md, [ca, cb], evs)
+    by_text = {c.text: c for c in claims}
+    # B citata prima -> numero 1; A dopo -> numero 2
+    assert by_text["Claim su B."].final_citation_no == 1
+    assert by_text["Claim su A."].final_citation_no == 2
+    assert out == "Claim su B [1]. Claim su A [2]."
+
+
+def test_dropped_claim_same_source_keeps_number_alive():
+    # il claim 1 (fonte A) e' REMOVED: il claim 2 (stessa fonte A) mantiene
+    # il numero 1 e la voce bibliografica resta coerente
+    md = "Da togliere [1]. Da tenere [2]."
+    c1 = _claim("Da togliere.", 1, verdict="REMOVED")
+    c2 = _claim("Da tenere.", 2)
+    evs = [_ev("ev1", "srcA"), _ev("ev2", "srcA")]
+    out, claims = renumber_citations(md, [c1, c2], evs)
+    by_text = {c.text: c for c in claims}
+    assert by_text["Da togliere."].final_citation_no is None
+    assert by_text["Da tenere."].final_citation_no == 1
+    # il marker del claim rimosso sparisce (la frase la toglie il verifier
+    # a monte; il renumber gestisce solo i marker)
+    assert "[1]. Da tenere [1]" not in out
+    assert "Da togliere [1]" not in out
+    assert "Da tenere [1]." in out

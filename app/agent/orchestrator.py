@@ -654,6 +654,25 @@ class Orchestrator:
                 # resi visibili nel report, mai nascosti
                 support_stats = _count_support(verified.claims)
                 verified_body = verified.markdown
+                # B18: meta-affermazioni sullo STATO delle evidenze senza
+                # base — parole tipo "contrastanti/contraddittorie" nel testo
+                # richiedono mixed/contradicted > 0 nelle stats reali,
+                # altrimenti la frase viene marcata visibilmente (mai
+                # dichiarazioni non sostenute indistinte dal resto).
+                if (re.search(r"contrastant|contraddittor", verified_body, re.I)
+                        and support_stats
+                        and not (support_stats.get("mixed")
+                                 or support_stats.get("contradicted"))):
+                    fixed = []
+                    for ln in verified_body.splitlines():
+                        if (re.search(r"contrastant|contraddittor", ln, re.I)
+                                and not ln.lstrip().startswith(">")):
+                            fixed.append(ln + " ⚠ *meta-affermazione non "
+                                         "confermata dalla verifica delle "
+                                         "evidenze*")
+                        else:
+                            fixed.append(ln)
+                    verified_body = "\n".join(fixed)
                 if support_stats and any(support_stats.values()):
                     verified_body += (
                         "\n\n> Stati delle affermazioni: "

@@ -137,16 +137,31 @@ def _rebuild_cluster(span_text: str, marker: str) -> str:
     return f"{t} {marker}".strip()
 
 
-def renumber_citations(markdown: str, claims: list) -> tuple[str, list]:
+def renumber_citations(markdown: str, claims: list,
+                       evidences: list | None = None) -> tuple[str, list]:
     """Rewrite citation markers and claim numbers into one coherent space.
 
     Returns (new_markdown, claims_with_final_citation_no). Deterministic.
     Surviving claims are numbered by first appearance in the text — position
     based when their sentence is located (span resolution above), marker
     order otherwise — and markers whose claim no longer exists are dropped.
-    Signature is FROZEN (the verifier calls it); the number-mapping path is
-    the compatibility fallback for old runs. See the module docstring for
-    the bibliography-coherence guarantee.
+
+    SOURCE-BASED numbering (default when `evidences` is given): the number
+    space belongs to SOURCES, not to claims. Walking the claims in citation
+    order, each source receives its number at its first citation; every
+    claim citing it shares that number (claim.final_citation_no = the number
+    of its primary source), and a multi-source claim carries all of them
+    ([1, 2]). The bibliography builder (orchestrator._final_markdown) emits
+    one Fonti entry per source at exactly that number, so by construction
+    every in-text number has an entry and no entry refers to an absent
+    number — even when several claims cite the same source (the historical
+    dangling-[27,28,29] defect).
+
+    CLAIM-BASED fallback (`evidences=None`, compat with old runs): markers
+    outside every located span are rewritten via the historical draft-number
+    mapping (first-appearance order); dangling markers and numbers without a
+    surviving claim are removed. The verifier always passes evidences; the
+    fallback keeps the frozen 2-arg call signature working.
     """
     md = sanitize_brackets(markdown)
     dropped = {c.citation_no for c in claims
@@ -199,26 +214,69 @@ def renumber_citations(markdown: str, claims: list) -> tuple[str, list]:
 
     mapping = {c.citation_no: new for new, c in enumerate(seen, start=1)}
 
-    # ---- rewrite: located spans get ONE marker at the claim's final number;
-    # markers outside spans keep the number-mapping fallback (lists keep only
-    # numbers mapping to surviving claims)
-    edits: list[tuple[int, int, str]] = []
-    for s, e, c in spans:
-        new_no = mapping.get(c.citation_no)
-        span_txt = md[s:e]
-        if new_no is None or not _MARKER.search(span_txt):
-            # no marker inside the span -> nothing to rewrite: the claim
-            # stays marker-less but keeps its final number (numbering and
-            # bibliography are unaffected). Inserting new markers is the
-            # writer's job, not the renumber's.
-            continue
-        edits.append((s, e, _rebuild_cluster(span_txt, f"[{new_no}]")))
-    for t in tokens:
-        if _owned(t.start()):
-            continue
-        new_nums = [mapping[n] for n in marker_numbers(t.group(0))
-                    if n in mapping]
-        edits.append((t.start(), t.end(), format_numbers(new_nums)))
+    # ---- source-based numbering (evidences given): numbers belong to
+    # SOURCES; claims citing the same source share the number, multi-source
+    # claims carry [n1, n2]
+    if evidences is not None:
+        ev_src = {e.evidence_id: e.source_id for e in evidences}
+
+        def _srcs(c: object) -> list[str]:
+            out: list[str] = []
+            for eid in c.evidence_ids:
+                s = ev_src.get(eid)
+                if s and s not in out:
+                    out.append(s)
+            return out
+
+        source_no: dict[str, int] = {}
+        for c in seen:
+            for s in _srcs(c):
+                if s not in source_no:
+                    source_no[s] = len(source_no) + 1
+
+        def _primary(c: object):
+            srcs = _srcs(c)
+            return source_no.get(srcs[0]) if srcs else None
+
+        edits = []
+        for s, e, c in spans:
+            nums = [source_no[x] for x in _srcs(c)]
+            span_txt = md[s:e]
+            if not nums or not _MARKER.search(span_txt):
+                # no marker inside the span -> nothing to rewrite: the claim
+                # stays marker-less but keeps its final number
+                continue
+            edits.append((s, e, _rebuild_cluster(span_txt, format_numbers(nums))))
+        for t in tokens:
+            if _owned(t.start()):
+                continue
+            new_nums: list[int] = []
+            for n in marker_numbers(t.group(0)):
+                c = by_no.get(n)
+                if c is not None and c.citation_no not in dropped:
+                    p = _primary(c)
+                    if p is not None and p not in new_nums:
+                        new_nums.append(p)
+            edits.append((t.start(), t.end(), format_numbers(new_nums)))
+    else:
+        # ---- legacy claim-number path (2-arg compat for old runs)
+        edits = []
+        for s, e, c in spans:
+            new_no = mapping.get(c.citation_no)
+            span_txt = md[s:e]
+            if new_no is None or not _MARKER.search(span_txt):
+                # no marker inside the span -> nothing to rewrite: the claim
+                # stays marker-less but keeps its final number (numbering and
+                # bibliography are unaffected). Inserting new markers is the
+                # writer's job, not the renumber's.
+                continue
+            edits.append((s, e, _rebuild_cluster(span_txt, f"[{new_no}]")))
+        for t in tokens:
+            if _owned(t.start()):
+                continue
+            new_nums = [mapping[n] for n in marker_numbers(t.group(0))
+                        if n in mapping]
+            edits.append((t.start(), t.end(), format_numbers(new_nums)))
 
     out = md
     for s, e, rep in sorted(edits, key=lambda x: x[0], reverse=True):
@@ -231,5 +289,10 @@ def renumber_citations(markdown: str, claims: list) -> tuple[str, list]:
     out = re.sub(r"\.\s*\.", ".", out)
 
     for c in claims:
-        c.final_citation_no = mapping.get(c.citation_no)
+        if c.citation_no in dropped:
+            c.final_citation_no = None
+        elif evidences is not None:
+            c.final_citation_no = _primary(c)
+        else:
+            c.final_citation_no = mapping.get(c.citation_no)
     return out, claims

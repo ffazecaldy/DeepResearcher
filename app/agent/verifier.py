@@ -723,7 +723,10 @@ class Verifier:
         stats.number_uncovered = len(uncovered)
         markdown = mark_uncovered(markdown, uncovered)
 
-        # ---- P0-2: unified citation numbering on the VERIFIED text ----
+        # ---- P0-2: unified citation numbering on the VERIFIED text.
+        # Source-based (B18): numbers belong to sources, claims citing the
+        # same source share the number -> no dangling in-text number.
         from app.agent.citations import renumber_citations
-        markdown, claims = renumber_citations(markdown, claims)
+        markdown, claims = renumber_citations(markdown, claims,
+                                              list(ev_map.values()))
         return VerifiedReport(markdown=markdown, claims=claims, stats=stats)
