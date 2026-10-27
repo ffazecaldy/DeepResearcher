@@ -137,31 +137,16 @@ def _rebuild_cluster(span_text: str, marker: str) -> str:
     return f"{t} {marker}".strip()
 
 
-def renumber_citations(markdown: str, claims: list,
-                       evidences: list | None = None) -> tuple[str, list]:
-    """Rewrite citation markers and claim numbers into one coherent space.
+def _seen_order(markdown: str, claims: list):
+    """Shared citation-order computation (used by renumber_citations AND
+    source_number_map so the two can never diverge).
 
-    Returns (new_markdown, claims_with_final_citation_no). Deterministic.
-    Surviving claims are numbered by first appearance in the text — position
-    based when their sentence is located (span resolution above), marker
-    order otherwise — and markers whose claim no longer exists are dropped.
-
-    SOURCE-BASED numbering (default when `evidences` is given): the number
-    space belongs to SOURCES, not to claims. Walking the claims in citation
-    order, each source receives its number at its first citation; every
-    claim citing it shares that number (claim.final_citation_no = the number
-    of its primary source), and a multi-source claim carries all of them
-    ([1, 2]). The bibliography builder (orchestrator._final_markdown) emits
-    one Fonti entry per source at exactly that number, so by construction
-    every in-text number has an entry and no entry refers to an absent
-    number — even when several claims cite the same source (the historical
-    dangling-[27,28,29] defect).
-
-    CLAIM-BASED fallback (`evidences=None`, compat with old runs): markers
-    outside every located span are rewritten via the historical draft-number
-    mapping (first-appearance order); dangling markers and numbers without a
-    surviving claim are removed. The verifier always passes evidences; the
-    fallback keeps the frozen 2-arg call signature working.
+    Returns (md, dropped, by_no, spans, tokens, seen): sanitized markdown,
+    dropped citation numbers (REMOVED/FAILED claims without replacement
+    text), draft-number -> claim map, located claim spans, markdown marker
+    tokens and the unified appearance order (located claims by span
+    position, markers outside spans by number mapping, remaining claims in
+    draft order).
     """
     md = sanitize_brackets(markdown)
     dropped = {c.citation_no for c in claims
@@ -190,16 +175,14 @@ def renumber_citations(markdown: str, claims: list,
             consumed.append((m.start(), m.end()))
     spans.sort(key=lambda t: t[0])
 
-    def _owned(pos: int) -> bool:
-        return any(s <= pos < e for s, e, _c in spans)
-
     # ---- unified appearance order: located claims by span position, then
     # markers outside spans by position (number mapping), then the claims
     # without any marker in draft order
     seen: list[object] = [c for _s, _e, c in spans]
     seen_ids = {id(c) for c in seen}
     tokens = list(_MARKER.finditer(md))
-    for t in sorted((t for t in tokens if not _owned(t.start())),
+    for t in sorted((t for t in tokens
+                     if not any(s <= t.start() < e for s, e, _c in spans)),
                     key=lambda t: t.start()):
         for n in marker_numbers(t.group(0)):
             c = by_no.get(n)
@@ -211,36 +194,99 @@ def renumber_citations(markdown: str, claims: list,
         if c.citation_no not in dropped and id(c) not in seen_ids:
             seen.append(c)
             seen_ids.add(id(c))
+    return md, dropped, by_no, spans, tokens, seen
+
+
+def source_number_map(markdown: str, claims: list,
+                      evidences: list) -> dict[str, int]:
+    """Per-source citation numbers, SAME unit and order rules as
+    renumber_citations: unit = identity_key when present (cross-platform
+    copies of one publication collapse into a single number), else
+    source_id; numbers assigned at first citation walking claims in
+    appearance order. The bibliography builder (orchestrator._final_markdown)
+    uses this map so every in-text number has exactly one Fonti entry.
+    """
+    md, dropped, _by_no, _spans, _tokens, seen = _seen_order(markdown, claims)
+    ev_by_id = {e.evidence_id: e for e in evidences}
+    source_no: dict[str, int] = {}
+    for c in seen:
+        if c.citation_no in dropped:
+            continue
+        for eid in c.evidence_ids:
+            e = ev_by_id.get(eid)
+            if e is None:
+                continue
+            k = getattr(e, "identity_key", "") or e.source_id
+            if k and k not in source_no:
+                source_no[k] = len(source_no) + 1
+    return source_no
+
+
+def renumber_citations(markdown: str, claims: list,
+                       evidences: list | None = None) -> tuple[str, list]:
+    """Rewrite citation markers and claim numbers into one coherent space.
+
+    Returns (new_markdown, claims_with_final_citation_no). Deterministic.
+    Surviving claims are numbered by first appearance in the text — position
+    based when their sentence is located (span resolution above), marker
+    order otherwise — and markers whose claim no longer exists are dropped.
+
+    SOURCE-BASED numbering (default when `evidences` is given): the number
+    space belongs to SOURCES, not to claims. Walking the claims in citation
+    order, each source receives its number at its first citation; every
+    claim citing it shares that number (claim.final_citation_no = the number
+    of its primary source), and a multi-source claim carries all of them
+    ([1, 2]). The bibliography builder (orchestrator._final_markdown) emits
+    one Fonti entry per source at exactly that number, so by construction
+    every in-text number has an entry and no entry refers to an absent
+    number — even when several claims cite the same source (the historical
+    dangling-[27,28,29] defect).
+
+    CLAIM-BASED fallback (`evidences=None`, compat with old runs): markers
+    outside every located span are rewritten via the historical draft-number
+    mapping (first-appearance order); dangling markers and numbers without a
+    surviving claim are removed. The verifier always passes evidences; the
+    fallback keeps the frozen 2-arg call signature working.
+    """
+    md, dropped, by_no, spans, tokens, seen = _seen_order(markdown, claims)
+
+    def _owned(pos: int) -> bool:
+        return any(s <= pos < en for s, en, _c in spans)
 
     mapping = {c.citation_no: new for new, c in enumerate(seen, start=1)}
 
     # ---- source-based numbering (evidences given): numbers belong to
-    # SOURCES; claims citing the same source share the number, multi-source
-    # claims carry [n1, n2]
+    # SOURCES (unit = identity_key when present, source_id otherwise —
+    # cross-platform copies of the same publication share ONE number);
+    # claims citing the same source share the number, multi-source claims
+    # carry [n1, n2]
     if evidences is not None:
-        ev_src = {e.evidence_id: e.source_id for e in evidences}
+        ev_by_id = {e.evidence_id: e for e in evidences}
 
-        def _srcs(c: object) -> list[str]:
+        def _src_keys(c: object) -> list[str]:
             out: list[str] = []
             for eid in c.evidence_ids:
-                s = ev_src.get(eid)
-                if s and s not in out:
-                    out.append(s)
+                e = ev_by_id.get(eid)
+                if e is None:
+                    continue
+                k = getattr(e, "identity_key", "") or e.source_id
+                if k and k not in out:
+                    out.append(k)
             return out
 
         source_no: dict[str, int] = {}
         for c in seen:
-            for s in _srcs(c):
-                if s not in source_no:
-                    source_no[s] = len(source_no) + 1
+            for k in _src_keys(c):
+                if k not in source_no:
+                    source_no[k] = len(source_no) + 1
 
         def _primary(c: object):
-            srcs = _srcs(c)
+            srcs = _src_keys(c)
             return source_no.get(srcs[0]) if srcs else None
 
         edits = []
         for s, e, c in spans:
-            nums = [source_no[x] for x in _srcs(c)]
+            nums = [source_no[x] for x in _src_keys(c)]
             span_txt = md[s:e]
             if not nums or not _MARKER.search(span_txt):
                 # no marker inside the span -> nothing to rewrite: the claim

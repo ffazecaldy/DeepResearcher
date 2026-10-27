@@ -632,9 +632,16 @@ class Orchestrator:
                 # e' congelato, si propaga sul campo GIA' presente su Evidence
                 st_by_src = {r["id"]: (r.get("source_type") or "")
                              for r in self.storage.sources_for_run(run_id)}
+                id_by_src = {r["id"]: (r.get("identity_key") or "")
+                             for r in self.storage.sources_for_run(run_id)}
                 for e in evidences:
                     if not e.source_type:
                         e.source_type = st_by_src.get(e.source_id) or None
+                    # B18: identita' bibliografica come attributo dinamico
+                    # (models.py congelato): la numerazione per fonte collassa
+                    # le copie cross-platform della stessa pubblicazione
+                    object.__setattr__(e, "identity_key",
+                                       id_by_src.get(e.source_id) or "")
                 verified = await self.verifier.verify(question, draft, ev_map, src_map)
                 for c in verified.claims:
                     self.storage.add_verification(run_id, c.claim_id,
@@ -1233,27 +1240,36 @@ def _chunkify(doc):
 
 
 def _final_markdown(title: str, body: str, claims, evidences, src_map) -> str:
-    """Bibliography off the UNIFIED citation numbers (P0-2): claim n -> its
-    evidences' sources; a source keeps the number of its first citing claim,
-    additional claims citing it reuse that number in their Fonti annotation.
+    """Bibliography off the SOURCE-based citation numbers (P0-2 + B18):
+    one Fonti entry per source IDENTITY (identity_key when present —
+    cross-platform copies of the same publication collapse into one entry —,
+    source_id otherwise), at exactly the number source_number_map assigns
+    (same unit and order rules as renumber_citations). By construction
+    every in-text number has one entry and every entry number is cited.
     """
+    from app.agent.citations import source_number_map
     # single H1: title added ONCE here; body must not carry its own
     body = re.sub(r"^\s*#\s+[^\n]+\n+", "", body)
+    nums = source_number_map(body, claims, evidences)
     lines = [f"# {title}", "", body.strip(), "", "## Fonti", ""]
-    seen_src: dict[str, int] = {}  # source_id -> bibliography number
+    emitted: dict[str, int] = {}  # identity/source_id -> bibliography number
     src_no: list[tuple[int, str]] = []  # (bib_no, line)
     for c in sorted((c for c in claims if c.final_citation_no),
                     key=lambda c: c.final_citation_no):
         for eid in c.evidence_ids:
             e = next((x for x in evidences if x.evidence_id == eid), None)
-            if e is None or e.source_id in seen_src:
+            if e is None:
+                continue
+            key = getattr(e, "identity_key", "") or e.source_id
+            if key in emitted:
                 continue
             src = src_map.get(e.source_id)
             if src is None:
                 continue
-            seen_src[e.source_id] = c.final_citation_no
+            n = nums.get(key) or c.final_citation_no
+            emitted[key] = n
             date = f", {src.published_at}" if src.published_at else ""
-            src_no.append((c.final_citation_no,
+            src_no.append((n,
                            f"{src.title or src.domain} — {src.final_url or src.url}"
                            f" ({src.domain}{date})"))
     # bibliography ordered by number: a source cited first by claim 3 takes 3

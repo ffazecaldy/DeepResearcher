@@ -232,3 +232,33 @@ def test_dropped_claim_same_source_keeps_number_alive():
     assert "[1]. Da tenere [1]" not in out
     assert "Da togliere [1]" not in out
     assert "Da tenere [1]." in out
+
+
+def test_same_identity_collapses_to_one_number():
+    # copie cross-platform della stessa pubblicazione (PubMed/PMC): identity
+    # uguale -> UN solo numero, non due voci bibliografiche
+    md = "Claim A [1]. Claim B [2]."
+    cA = _claim("Claim A.", 1)
+    cB = _claim("Claim B.", 2)
+    e1 = _ev("ev1", "srcPubMed")
+    e2 = _ev("ev2", "srcPMC")
+    object.__setattr__(e1, "identity_key", "doi:10.1234/x")
+    object.__setattr__(e2, "identity_key", "doi:10.1234/x")
+    out, claims = renumber_citations(md, [cA, cB], [e1, e2])
+    by_text = {c.text: c for c in claims}
+    assert by_text["Claim A."].final_citation_no == 1
+    assert by_text["Claim B."].final_citation_no == 1
+    assert out == "Claim A [1]. Claim B [1]."
+
+
+def test_bibliography_numbers_match_source_map():
+    # la mappa della bibliografia (source_number_map) usa le stesse regole
+    # del renumber: stesso ordine, stessa identita'
+    from app.agent.citations import source_number_map
+    md = "Prima [1]. Seconda [2]."
+    c1 = _claim("Prima.", 1)
+    c2 = _claim("Seconda.", 2)
+    evs = [_ev("ev1", "s1"), _ev("ev2", "s2")]
+    renumber_citations(md, [c1, c2], evs)
+    nums = source_number_map(md, [c1, c2], evs)
+    assert nums == {"s1": 1, "s2": 2}
