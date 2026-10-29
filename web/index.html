@@ -41,6 +41,10 @@
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
   <symbol id="i-printer" viewBox="0 0 24 24"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></symbol>
   <symbol id="i-list" viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></symbol>
+  <symbol id="i-rotccw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+  <symbol id="i-type" viewBox="0 0 24 24"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" x2="15" y1="20" y2="20"/><line x1="12" x2="12" y1="4" y2="20"/></symbol>
+  <symbol id="i-panel-l" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></symbol>
+  <symbol id="i-panel-r" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></symbol>
 </svg>
 
 <header class="topbar">
@@ -102,6 +106,10 @@
       </div>
     </form>
 
+    <div class="splitter sh" id="sp-form" role="separator" aria-orientation="horizontal"
+         tabindex="0" aria-label="Altezza del modulo Nuova ricerca"
+         title="Trascina o usa le frecce per regolare l'altezza del modulo"></div>
+
     <section class="panel grow" aria-label="Cronologia ricerche">
       <div class="ph">
         <svg class="ic"><use href="#i-db"/></svg>
@@ -122,6 +130,10 @@
     </section>
   </aside>
 
+  <div class="splitter sv" id="sp-left" role="separator" aria-orientation="vertical"
+       tabindex="0" aria-label="Larghezza colonna sinistra"
+       title="Trascina o usa le frecce per regolare la larghezza di Nuova ricerca e Cronologia"></div>
+
   <!-- ============ CENTRO: banner azione + statusbar + attivita + report ============ -->
   <section class="col col-center" aria-label="Avanzamento e report">
     <div id="statusbar" class="statusbar" role="status" aria-live="polite">
@@ -135,9 +147,10 @@
             title="Claim (frasi) estratti dal report finale — clic per aprire la vista Verifiche">claims estratti <b id="sb-claims" class="num">0</b></span>
       <span class="sbi sbi-grow"></span>
       <span class="sbi resizers">
-        <button type="button" class="rbtn" data-col="left" title="Allarga/restringi colonna sinistra" aria-label="Ridimensiona colonna sinistra"><svg class="ic s12"><use href="#i-max"/></svg></button>
-        <button type="button" class="rbtn" data-col="center" title="Allarga/restringi area centrale" aria-label="Ridimensiona area centrale"><svg class="ic s12"><use href="#i-max"/></svg></button>
-        <button type="button" class="rbtn" data-col="right" title="Allarga/restringi colonna destra" aria-label="Ridimensiona colonna destra"><svg class="ic s12"><use href="#i-max"/></svg></button>
+        <button type="button" class="rbtn" id="tg-left" aria-pressed="false" title="Mostra/nascondi colonna sinistra" aria-label="Mostra o nascondi la colonna sinistra"><svg class="ic s12"><use href="#i-panel-l"/></svg></button>
+        <button type="button" class="rbtn" data-col="center" title="Allarga/restringe l'area centrale" aria-label="Allarga o restringi l'area centrale"><svg class="ic s12"><use href="#i-max"/></svg></button>
+        <button type="button" class="rbtn" id="tg-right" aria-pressed="false" title="Mostra/nascondi colonna destra" aria-label="Mostra o nascondi la colonna destra"><svg class="ic s12"><use href="#i-panel-r"/></svg></button>
+        <button type="button" class="rbtn" id="layout-reset" title="Ripristina il layout iniziale (non tocca ricerche, report o impostazioni)" aria-label="Ripristina il layout iniziale"><svg class="ic s12"><use href="#i-rotccw"/></svg></button>
       </span>
     </div>
 
@@ -233,6 +246,10 @@
       <ul id="activity" class="activity" role="log" aria-live="polite"></ul>
     </section>
 
+    <div class="splitter sh" id="sp-act" role="separator" aria-orientation="horizontal"
+         tabindex="0" aria-label="Altezza del pannello Attivita"
+         title="Trascina o usa le frecce per distribuire l'altezza tra Attivita e Report"></div>
+
     <section id="report-panel" class="panel grow" aria-label="Report">
       <div class="ph">
         <svg class="ic"><use href="#i-file"/></svg>
@@ -253,6 +270,10 @@
                    aria-label="Cerca nel testo del report" title="Cerca e evidenzia nel report">
             <span id="report-search-n" class="mono faint" aria-live="polite"></span>
           </span>
+          <button id="text-size-btn" class="hbtn wide" type="button" aria-pressed="false"
+                  aria-label="Testo standard o ampio" title="Testo standard / Testo ampio">
+            <svg class="ic s12"><use href="#i-type"/></svg>
+          </button>
           <button id="reading-mode-btn" class="hbtn" type="button" aria-pressed="false"
                   aria-label="Modalità lettura" title="Modalità lettura: nasconde le colonne laterali (Esc per uscire)">
             <svg class="ic s12"><use href="#i-book"/></svg>
@@ -316,6 +337,10 @@
       </div>
     </section>
 
+    <div class="splitter sh" id="sp-cit" role="separator" aria-orientation="horizontal"
+         tabindex="0" aria-label="Altezza del dettaglio citazione" hidden
+         title="Trascina o usa le frecce per regolare lo spazio del dettaglio citazione"></div>
+
     <section class="panel" aria-label="Impostazioni">
       <div class="ph">
         <svg class="ic"><use href="#i-settings"/></svg>
@@ -334,6 +359,13 @@
     </section>
   </aside>
 </main>
+
+<button type="button" class="edge-tab left" id="edge-left" hidden
+        aria-label="Riapri la colonna sinistra" title="Riapri colonna sinistra">
+  <svg class="ic s12"><use href="#i-chev-r"/></svg></button>
+<button type="button" class="edge-tab right" id="edge-right" hidden
+        aria-label="Riapri la colonna destra" title="Riapri colonna destra">
+  <svg class="ic s12"><use href="#i-chev-d"/></svg></button>
 
 <div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
 <script src="/app.js"></script>

@@ -1116,6 +1116,7 @@ async function openCitation(n) {
       "cronologia: il dettaglio citazioni non è più disponibile.</p>";
     $("popover-title").textContent = `Citazione [${n}]`;
     pop.hidden = false;
+    updateCitSplit();
     return;
   }
   const claims = (data.claims || []).filter(
@@ -1162,6 +1163,7 @@ async function openCitation(n) {
   }
   $("popover-title").textContent = `Citazione [${n}]`;
   pop.hidden = false;
+  updateCitSplit();
 }
 
 async function loadReportJson() {
@@ -1197,6 +1199,11 @@ function selectCitation(btn) {
 
 function closePopover(refocus = false) {
   $("popover").hidden = true;
+  // B19: il separatore citazione vive solo col pannello aperto
+  const p = $("popover");
+  if (p) { p.style.height = ""; p.style.flex = ""; }
+  const spc = $("sp-cit");
+  if (spc) spc.hidden = true;
   const hint = $("popover-hint");
   if (hint) hint.hidden = false;
   document.querySelectorAll("button.citation.citation-sel")
@@ -1626,6 +1633,14 @@ function setActivityCollapsed(collapsed, save) {
   if (head) head.setAttribute("aria-expanded", collapsed ? "false" : "true");
   const ttl = $("activity-ttl");
   if (ttl) ttl.textContent = collapsed ? "Mostra attivita" : "Attivita";
+  // B19: collassato = solo riga header -> il separatore sparisce e l'altezza
+  // esplicita va rimossa (non deve restare spazio riservato)
+  const sp = $("sp-act");
+  if (sp) sp.hidden = collapsed;
+  if (collapsed) { panel.style.height = ""; panel.style.flex = ""; }
+  else if (layout && layout.actH) {
+    panel.style.height = layout.actH + "px"; panel.style.flex = "none";
+  }
   if (save) localStorage.setItem("dr_activity", collapsed ? "1" : "0");
 }
 function applyActivityPref() {
@@ -1643,6 +1658,252 @@ function setReading(on, save = true) {
                  : "Modalità lettura: nasconde le colonne laterali";
   }
   if (save) localStorage.setItem("dr_reading", on ? "1" : "0");
+  // B19: la modalità lettura vive anche nel layout persistente
+  if (typeof layout !== "undefined" && layout) { layout.reading = on; if (save) saveLayout(); }
+}
+
+/* ====================== LAYOUT (B19): separatori trascinabili, colonne
+   chiudibili, persistenza versionata ====================== */
+/* chiave versionata: cambiate le proporzioni, cambia v e i vecchi valori
+   vengono scartati (validazione su ogni campo, default sempre validi) */
+const LAYOUT_KEY = "dr_layout_v1";
+const LIM = {
+  left: [220, 480], right: [240, 500], center: [38, 72],
+  formH: [96, 460], actH: [110, 640], citH: [120, 640],
+};
+const LAYOUT_DEF = { v: 1, left: 280, right: 300, center: null, formH: null,
+  actH: null, citH: null, closed: { left: false, right: false },
+  reading: false, textSize: "std" };
+let layout = null;
+
+function loadLayout() {
+  const d = JSON.parse(JSON.stringify(LAYOUT_DEF));
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    if (!raw) return d;
+    const o = JSON.parse(raw);
+    if (!o || o.v !== 1) return d;
+    const num = (x, [a, b], dv) =>
+      (typeof x === "number" && isFinite(x)) ? Math.min(b, Math.max(a, x)) : dv;
+    d.left = num(o.left, LIM.left, d.left);
+    d.right = num(o.right, LIM.right, d.right);
+    d.center = num(o.center, LIM.center, null);
+    d.formH = num(o.formH, LIM.formH, null);
+    d.actH = num(o.actH, LIM.actH, null);
+    d.citH = num(o.citH, LIM.citH, null);
+    d.closed = { left: o.closed?.left === true, right: o.closed?.right === true };
+    d.reading = o.reading === true;
+    d.textSize = o.textSize === "wide" ? "wide" : "std";
+  } catch { /* storage assente/corrotto: restano i default validi */ }
+  return d;
+}
+function saveLayout() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch {}
+}
+/* riporta tutto nei limiti vs finestra corrente: cambiare monitor o stringere
+   la finestra non porta pannelli fuori schermo e non schiaccia il report */
+function clampAll() {
+  const vw = window.innerWidth;
+  layout.left = Math.min(LIM.left[1], Math.max(LIM.left[0], layout.left));
+  layout.right = Math.min(LIM.right[1], Math.max(LIM.right[0], layout.right));
+  const minCenter = Math.round(vw * LIM.center[0] / 100);
+  const used = (layout.closed.left ? 0 : layout.left) +
+               (layout.closed.right ? 0 : layout.right) + minCenter + 48;
+  if (used > vw) {
+    let over = used - vw;
+    if (!layout.closed.left) {
+      const cut = Math.min(over, layout.left - LIM.left[0]);
+      layout.left -= cut; over -= cut;
+    }
+    if (over > 0 && !layout.closed.right) {
+      const cut = Math.min(over, layout.right - LIM.right[0]);
+      layout.right -= cut;
+    }
+  }
+  if (layout.formH) layout.formH = Math.min(LIM.formH[1], Math.max(LIM.formH[0], layout.formH));
+  if (layout.actH) layout.actH = Math.min(LIM.actH[1], Math.max(LIM.actH[0], layout.actH));
+  if (layout.citH) layout.citH = Math.min(LIM.citH[1], Math.max(LIM.citH[0], layout.citH));
+}
+function applyLayout() {
+  if (!layout) return;
+  clampAll();
+  const root = document.documentElement.style;
+  root.setProperty("--w-left", layout.left + "px");
+  root.setProperty("--w-right", layout.right + "px");
+  const cc = document.querySelector(".col-center");
+  if (cc) {
+    if (layout.center != null) {
+      root.setProperty("--w-center", layout.center + "%");
+      cc.classList.add("c-w");
+    } else cc.classList.remove("c-w");
+  }
+  const form = $("run-form");
+  if (form) {
+    if (layout.formH) { form.style.height = layout.formH + "px"; form.style.flex = "none"; }
+    else { form.style.height = ""; form.style.flex = ""; }
+  }
+  const act = $("activity-panel");
+  if (act && !act.classList.contains("collapsed") && layout.actH) {
+    act.style.height = layout.actH + "px"; act.style.flex = "none";
+  } else if (act) { act.style.height = ""; act.style.flex = ""; }
+  updateCitSplit();
+  setColClosed("left", layout.closed.left, false);
+  setColClosed("right", layout.closed.right, false);
+  syncCenterBtn();
+  syncSplitAria();
+}
+function syncCenterBtn() {
+  const b = document.querySelector('.rbtn[data-col="center"]');
+  if (b) b.classList.toggle("on", layout.center != null && layout.center !== 60);
+}
+function syncSplitAria() {
+  const l = $("sp-left"), r = $("sp-right");
+  if (l) { l.setAttribute("aria-valuenow", String(layout.left));
+           l.setAttribute("aria-valuetext", layout.left + " pixel"); }
+  if (r) { r.setAttribute("aria-valuenow", String(layout.right));
+           r.setAttribute("aria-valuetext", layout.right + " pixel"); }
+}
+function setColClosed(side, closed, save = true) {
+  if (!layout) return;
+  layout.closed[side] = closed;
+  const col = document.querySelector(side === "left" ? ".col-left" : ".col-right");
+  if (col) col.classList.toggle("closed", closed);
+  const sp = $(side === "left" ? "sp-left" : "sp-right");
+  if (sp) sp.setAttribute("aria-disabled", closed ? "true" : "false");
+  const tg = $(side === "left" ? "tg-left" : "tg-right");
+  if (tg) { tg.setAttribute("aria-pressed", closed ? "true" : "false");
+            tg.classList.toggle("on", closed); }
+  const edge = $(side === "left" ? "edge-left" : "edge-right");
+  if (edge) edge.hidden = !closed;
+  if (save) saveLayout();
+}
+function setTextSize(mode, save = true) {
+  if (!layout) return;
+  layout.textSize = mode === "wide" ? "wide" : "std";
+  const rp = $("report-panel");
+  if (rp) rp.classList.toggle("wide-text", layout.textSize === "wide");
+  const b = $("text-size-btn");
+  if (b) {
+    b.setAttribute("aria-pressed", layout.textSize === "wide" ? "true" : "false");
+    b.title = layout.textSize === "wide" ? "Torna al testo standard"
+                                         : "Testo ampio (colonna piu' larga)";
+  }
+  if (save) saveLayout();
+}
+function resetLayout() {
+  try { localStorage.removeItem(LAYOUT_KEY); } catch {}
+  layout = loadLayout();
+  setReading(false, false);
+  setTextSize("std", false);
+  applyLayout();
+  toast("Layout ripristinato");
+}
+/* il dettaglio citazione ha il separatore solo quando e' aperto */
+function updateCitSplit() {
+  const pp = $("popover"), sp = $("sp-cit");
+  if (!pp || !sp) return;
+  const open = !pp.hidden;
+  sp.hidden = !open;
+  if (open && layout && layout.citH) {
+    pp.style.height = layout.citH + "px"; pp.style.flex = "none";
+  }
+}
+/* ridimensionamento fluido: solo scritture di stile, nessun re-render,
+   nessuna chiamata di rete; il salvataggio avviene a fine trascinamento */
+function wireSplitters() {
+  const cl = (v, [a, b]) => Math.min(b, Math.max(a, v));
+  function make(el, opts) {
+    if (!el) return;
+    const horiz = el.classList.contains("sh");
+    let startPos = 0, startVal = 0, active = false;
+    el.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      active = true;
+      startPos = horiz ? e.clientY : e.clientX;
+      startVal = opts.get();
+      try { el.setPointerCapture(e.pointerId); } catch {}
+      el.classList.add("dragging");
+      document.body.classList.add("dragging");
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (!active) return;
+      const pos = horiz ? e.clientY : e.clientX;
+      opts.set(startVal + (pos - startPos) * (opts.dir || 1));
+      syncSplitAria();
+    });
+    const end = (e) => {
+      if (!active) return;
+      active = false;
+      el.classList.remove("dragging");
+      document.body.classList.remove("dragging");
+      try { el.releasePointerCapture(e.pointerId); } catch {}
+      saveLayout();
+    };
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+    el.addEventListener("lostpointercapture", end);
+    el.addEventListener("keydown", (e) => {
+      const step = e.shiftKey ? 48 : 16;
+      let d = null;
+      if (!horiz && e.key === "ArrowLeft") d = -step;
+      else if (!horiz && e.key === "ArrowRight") d = step;
+      else if (horiz && e.key === "ArrowUp") d = -step;
+      else if (horiz && e.key === "ArrowDown") d = step;
+      else if (e.key === "Home" || e.key === "End") {
+        e.preventDefault();
+        opts.set(e.key === "Home" ? opts.min() : opts.max());
+        syncSplitAria(); saveLayout();
+        return;
+      } else return;
+      e.preventDefault();
+      opts.set(cl(opts.get() + d, opts.lim));
+      syncSplitAria(); saveLayout();
+    });
+  }
+  make($("sp-left"), {
+    dir: 1, lim: LIM.left,
+    get: () => layout.left, min: () => LIM.left[0], max: () => LIM.left[1],
+    set: (v) => { layout.left = cl(v, LIM.left);
+      document.documentElement.style.setProperty("--w-left", layout.left + "px"); },
+  });
+  make($("sp-right"), {
+    dir: -1, lim: LIM.right,
+    get: () => layout.right, min: () => LIM.right[0], max: () => LIM.right[1],
+    set: (v) => { layout.right = cl(v, LIM.right);
+      document.documentElement.style.setProperty("--w-right", layout.right + "px"); },
+  });
+  make($("sp-form"), {
+    dir: 1, lim: LIM.formH,
+    get: () => layout.formH ?? ($("run-form").offsetHeight || 200),
+    min: () => LIM.formH[0], max: () => LIM.formH[1],
+    set: (v) => { layout.formH = cl(v, LIM.formH);
+      const f = $("run-form");
+      f.style.height = layout.formH + "px"; f.style.flex = "none"; },
+  });
+  make($("sp-act"), {
+    dir: -1, lim: LIM.actH,
+    get: () => layout.actH ?? ($("activity-panel").offsetHeight || 260),
+    min: () => LIM.actH[0], max: () => LIM.actH[1],
+    set: (v) => { layout.actH = cl(v, LIM.actH);
+      const a = $("activity-panel");
+      if (!a.classList.contains("collapsed")) {
+        a.style.height = layout.actH + "px"; a.style.flex = "none";
+      } },
+  });
+  make($("sp-cit"), {
+    dir: 1, lim: LIM.citH,
+    get: () => layout.citH ?? ($("popover").offsetHeight || 260),
+    min: () => LIM.citH[0], max: () => LIM.citH[1],
+    set: (v) => { layout.citH = cl(v, LIM.citH);
+      const p = $("popover");
+      p.style.height = layout.citH + "px"; p.style.flex = "none"; },
+  });
+  let rsT = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(rsT);
+    rsT = setTimeout(() => { clampAll(); applyLayout(); }, 200);
+  });
 }
 
 /* ====================== avvisi consultabili ====================== */
@@ -1731,10 +1992,19 @@ function renderWarningsPanel() {
   const wp = $("warnings-panel");
   const w = state.warnings;
   if (!wp || !w || !w.total) { if (wp) wp.hidden = true; return; }
-  const parts = [`<div class="coherence-head"><span class="c-badge">${w.total} avvisi</span>` +
-    `<span class="cr">dettaglio degli avvisi della ricerca</span>` +
-    `<button id="warnings-close" class="hbtn" type="button" aria-label="Chiudi avvisi" title="Chiudi">` +
+  /* B19: riepilogo compatto su UNA riga (sempre visibile, anche in lettura);
+     l'elenco completo vive nel corpo espandibile e nella scheda Verifiche */
+  const parts = [`<div class="coherence-head" id="warn-head" role="button" tabindex="0"` +
+    ` aria-expanded="false" aria-controls="warn-body"` +
+    ` title="Clic per mostrare o nascondere il dettaglio degli avvisi">` +
+    `<span class="c-badge">${w.total} avvisi</span>` +
+    `<span class="cr">verifiche e problemi operativi</span>` +
+    `<span class="spacer"></span>` +
+    `<button id="warn-open-verifs" class="hbtn wide" type="button"` +
+    ` title="Apri l'elenco completo nella scheda Verifiche">verifiche</button>` +
+    `<button id="warnings-close" class="hbtn" type="button" aria-label="Nascondi il riepilogo avvisi" title="Nascondi">` +
     `<svg class="ic s12" aria-hidden="true"><use href="#i-x"/></svg></button></div>`];
+  parts.push('<div class="w-body" id="warn-body" hidden>');
   if (w.result.length) {
     parts.push('<div class="w-sec">Problemi del risultato</div><ul>');
     for (const r of w.result) {
@@ -1755,10 +2025,27 @@ function renderWarningsPanel() {
     }
     parts.push("</ul>");
   }
+  parts.push("</div>");
   wp.innerHTML = parts.join("");
   wp.hidden = false;
-  const xc = $("warnings-close");
-  if (xc) xc.addEventListener("click", () => { wp.hidden = true; });
+  const body = $("warn-body"), head = $("warn-head");
+  const tog = () => {
+    const opening = body.hidden;
+    body.hidden = !opening;
+    head.setAttribute("aria-expanded", opening ? "true" : "false");
+  };
+  head.addEventListener("click", (e) => {
+    if (e.target.closest("#warn-open-verifs") || e.target.closest("#warnings-close")) return;
+    tog();
+  });
+  head.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); tog(); }
+  });
+  $("warn-open-verifs").addEventListener("click", () => {
+    setReportView("verifs");
+    wp.hidden = true;
+  });
+  $("warnings-close").addEventListener("click", () => { wp.hidden = true; });
 }
 
 /* ====================== viste Report / Fonti / Verifiche ====================== */
@@ -2082,8 +2369,12 @@ function repeatRun() {
 /* ============================== init ============================== */
 function init() {
   initTheme();
+  // B19: il layout si carica PER PRIMA (lettura, colonne, misure salvate)
+  layout = loadLayout();
   // modalità lettura salvata dall'ultima sessione
-  setReading(localStorage.getItem("dr_reading") === "1", false);
+  // B19: la modalità lettura si ripristina dal layout persistente (fallback
+  // alla vecchia chiave dr_reading per i profili pre-B19)
+  setReading(layout.reading || localStorage.getItem("dr_reading") === "1", false);
   $("run-form").addEventListener("submit", startRun);
   $("stop-btn").addEventListener("click", stopRun);
   $("popover-close").addEventListener("click", () => closePopover(true));
@@ -2150,29 +2441,29 @@ function init() {
   formReset.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); formReset.click(); }
   });
-  // resizer colonne: click = alterna larghezza larga/normale (limitata, salvata)
-  const LIM = { left: [200, 420], center: [40, 70], right: [220, 460] };
-  document.querySelectorAll(".rbtn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const col = btn.dataset.col;
-      const root = document.documentElement.style;
-      if (col === "center") {
-        const cur = state.colSizes.center ?? 60;
-        const next = cur >= 70 ? 40 : Math.min(70, cur + 15);
-        state.colSizes.center = next;
-        root.setProperty("--w-center", `${next}%`);
-        document.querySelector(".col-center").classList.add("c-w");
-        btn.classList.toggle("on", next !== 60);
-      } else {
-        const def = col === "left" ? 280 : 300;
-        const cur = state.colSizes[col] ?? def;
-        const [min, max] = LIM[col];
-        const next = cur >= max ? min : Math.min(max, cur + 80);
-        state.colSizes[col] = next;
-        root.setProperty(`--w-${col}`, `${next}px`);
-        btn.classList.toggle("on", next !== def);
-      }
-    });
+  // B19: separatori trascinabili + colonne chiudibili + layout persistente
+  applyLayout();
+  wireSplitters();
+  setTextSize(layout.textSize, false);
+  $("tg-left").addEventListener("click", () =>
+    setColClosed("left", !layout.closed.left));
+  $("tg-right").addEventListener("click", () =>
+    setColClosed("right", !layout.closed.right));
+  $("edge-left").addEventListener("click", () => setColClosed("left", false));
+  $("edge-right").addEventListener("click", () => setColClosed("right", false));
+  $("layout-reset").addEventListener("click", resetLayout);
+  $("text-size-btn").addEventListener("click", () =>
+    setTextSize(layout.textSize === "wide" ? "std" : "wide"));
+  const cbtn = document.querySelector('.rbtn[data-col="center"]');
+  cbtn.addEventListener("click", () => {
+    const cur = layout.center ?? 60;
+    const next = cur >= LIM.center[1] ? LIM.center[0]
+      : Math.min(LIM.center[1], cur + 15);
+    layout.center = next;
+    document.documentElement.style.setProperty("--w-center", next + "%");
+    document.querySelector(".col-center").classList.add("c-w");
+    syncCenterBtn();
+    saveLayout();
   });
   $("plan-head").addEventListener("click", () => {
     const plan = $("plan");
