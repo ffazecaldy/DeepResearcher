@@ -1978,6 +1978,9 @@ async function refreshWarnings() {
     }
     const wp = $("warnings-panel");
     if (wp && !wp.hidden) renderWarningsPanel();
+    else if (w && w.total > 0) renderWarningsPanel(); // B19-fix: il riepilogo
+    // compatto (una riga) compare da solo a fine ricerca e sui run storici:
+    // prima restava nascosto finche' non si cliccava il badge della cronologia
   } catch { /* report non disponibile: nessun avviso calcolabile */ }
 }
 
