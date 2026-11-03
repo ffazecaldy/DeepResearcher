@@ -202,6 +202,39 @@ async def test_full_pipeline_mock(tmp_path, monkeypatch):
     assert outcome.stats["decisions"].get("fake") == 3
 
 
+async def test_stop_reason_survives_natural_end(tmp_path, monkeypatch):
+    """B20c: una ricerca finita per MAX_CICLI (gap non completo, nessun
+    limite toccato) deve arrivare alla UI con il motivo reale dell'arresto.
+
+    Bug reale osservato sul run vitamina D: la tupla (False, \"\", \"\") del
+    \"continua\" di _should_stop sovrascriveva stop_reason=\"MAX_CICLI\" e
+    run_completed/limits_json portavano stop_reason=\"\" — la UI non poteva
+    distinguere \"limite cicli\" da \"copertura raggiunta\".
+    """
+    orch, storage, settings = _build(tmp_path, monkeypatch)
+    run_id = "run_stop_reason"
+
+    outcome = await orch.run("Chi ha brevettato il telefono?", "it",
+                             Depth.RAPIDA, run_id, __import__("asyncio").Event())
+
+    assert outcome.status == "completed"
+    # 1) stats persistite in limits_json
+    assert outcome.stats["stop_reason"] == "MAX_CICLI"
+    assert outcome.stats["stop_detail"]
+    run = storage.get_run(run_id)
+    lim = json.loads(run["limits_json"])
+    assert lim["stop_reason"] == "MAX_CICLI"
+    # 2) evento run_completed con lo stesso motivo
+    done = [e for e in storage.events_for_run(run_id)
+            if e["type"] == "run_completed"]
+    assert json.loads(done[0]["payload_json"])["stop_reason"] == "MAX_CICLI"
+    # 3) il run-header della UI (setStopReason) legge lo stesso codice
+    assert lim["stop_reason"] in {
+        "MAX_CICLI", "COPERTURA_COMPLETA", "LIMITE_TEMPO", "LIMITE_PAGINE",
+        "LIMITE_CICLO", "ANNULLATO", "NESSUNA_NOVITA",
+        "SOTTODOMANDE_NON_RISOLVIBILI"}
+
+
 async def test_cancel_before_run(tmp_path, monkeypatch):
     import asyncio
 

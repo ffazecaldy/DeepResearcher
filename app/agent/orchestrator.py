@@ -162,7 +162,8 @@ class Orchestrator:
         cycle_deadline = [0.0]
         cycle_tokens_start = [0]
         stop_reason: str = "MAX_CICLI"  # default when the loop ends naturally
-        stop_detail: str = ""
+        stop_detail: str = ("raggiunto il numero massimo di cicli previsti "
+                            "dalla profondità scelta")
         domain_by_source: dict[str, str] = {}
         status = "completed"
         error: str | None = None
@@ -561,12 +562,17 @@ class Orchestrator:
                                           gap_status=report.status_by_id)
 
                 # ---- UNIQUE termination point ----
-                stop, stop_reason, stop_detail = self._should_stop(
+                # B20c: il motivo di arresto viene SOVRASCRITTO solo quando
+                # _should_stop decide davvero di fermare — prima la tupla
+                # (False, "", "") del "continua" azzerava stop_reason e una
+                # ricerca finita per MAX_CICLI arrivava alla UI senza motivo.
+                stop, next_reason, next_detail = self._should_stop(
                     ctx=ctx, cycle=cycle, effective=effective, budget=budget,
                     gap_report=report, new_urls=new_urls,
                     new_domains=len({d for d in domains}),
                     shared_state=shared_state)
                 if stop:
+                    stop_reason, stop_detail = next_reason, next_detail
                     log.debug("[TERMINAZIONE] %s — %s", stop_reason, stop_detail)
                     self.emit(ctx, "cycle_completed", cycle, complete=True,
                               stop_reason=stop_reason, stop_detail=stop_detail)
