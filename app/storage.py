@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS sources(
   published_at TEXT, author TEXT, redirects_json TEXT, error TEXT, byte_len INTEGER,
   content_hash TEXT DEFAULT '', identity_key TEXT DEFAULT '',
   source_type TEXT, quality_score INTEGER,
-  relevance REAL, accepted INTEGER DEFAULT 0
+  relevance REAL, accepted INTEGER DEFAULT 0,
+  abstract_only INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS chunks(
   id TEXT PRIMARY KEY, source_id TEXT NOT NULL, idx INTEGER, text TEXT,
@@ -107,6 +108,9 @@ class Storage:
         if "identity_key" not in src_cols:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN identity_key TEXT DEFAULT ''")
+        if "abstract_only" not in src_cols:
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN abstract_only INTEGER DEFAULT 0")
         # future migrations go here, each guarded by a PRAGMA table_info check
 
     def close(self) -> None:
@@ -195,15 +199,16 @@ class Storage:
                    domain: str, title: str, http_status: int | None, content_type: str,
                    fetch_status: str, published_at: str | None, author: str | None,
                    redirects: list[str], error: str | None, byte_len: int,
-                   content_hash: str = "", identity_key: str = "") -> None:
+                   content_hash: str = "", identity_key: str = "",
+                   abstract_only: bool = False) -> None:
         self._exec(
             "INSERT INTO sources(id, run_id, url, url_final, domain, title, http_status,"
             " content_type, fetch_status, published_at, author, redirects_json, error,"
-            " byte_len, content_hash, identity_key)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " byte_len, content_hash, identity_key, abstract_only)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (source_id, run_id, url, url_final, domain, title, http_status, content_type,
              fetch_status, published_at, author, json.dumps(redirects), error, byte_len,
-             content_hash, identity_key),
+             content_hash, identity_key, int(bool(abstract_only))),
         )
 
     def content_hash_seen(self, run_id: str, content_hash: str) -> bool:

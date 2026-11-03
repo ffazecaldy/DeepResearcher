@@ -49,9 +49,10 @@ _HASH_MAX_CHARS = 200_000
 
 # attributi dinamici fuori-schema (vedi docstring modulo)
 _DYNAMIC_META_KEYS = ("identity_key", "identity_aliases",
-                      "published_at_validated")
+                      "published_at_validated", "abstract_only")
 _DYNAMIC_DEFAULTS: dict = {"identity_key": "", "identity_aliases": [],
-                           "published_at_validated": False}
+                           "published_at_validated": False,
+                           "abstract_only": False}
 
 
 def set_dynamic_meta(doc: FetchedDocument, key: str, value) -> None:
@@ -301,6 +302,10 @@ class Fetcher:
                     ikey, ialias = identity_keys(meta, url, str(resp.url))
                     set_dynamic_meta(doc, "identity_key", ikey)
                     set_dynamic_meta(doc, "identity_aliases", list(ialias))
+                    # abstract-only: la pagina offre solo l'abstract (UI lo
+                    # segnala; le citazioni di questa fonte vengono da li')
+                    set_dynamic_meta(doc, "abstract_only",
+                                     bool(meta.get("abstract_only")))
                     doc.byte_len = len(resp.content)
                     doc.text = text
                     # P1-8: links come from the RAW HTML (<a href>), not from

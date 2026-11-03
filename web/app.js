@@ -388,7 +388,8 @@ const ACTION_ACTIVE = {
 /* tipi che COMPLETANO un'azione (ultima azione in grigio) */
 const ACTION_DONE = {
   search_result_found: (p) => `trovati ${p.count} risultati`,
-  source_fetched: (p) => p.reused ? `riusata ${shortUrl(p.url)}` : `letta ${shortUrl(p.url)}`,
+  source_fetched: (p) => (p.reused ? `riusata ${shortUrl(p.url)}` : `letta ${shortUrl(p.url)}`) +
+    (p.abstract_only ? " (solo abstract)" : ""),
   source_duplicate: (p) => `duplicato: ${shortUrl(p.url)}`,
   cycle_contribution: (p) => `+${p.new_evidences || 0} evidenze, +${p.new_domains || 0} domini`,
   source_failed: (p) => `errore lettura ${shortUrl(p.url)}`,
@@ -2265,6 +2266,7 @@ function renderSourcesView(data) {
   const fallite = state.srcRows.filter(isFailed).length;
   const duplicati = state.srcRows.filter((r) => r.dup).length;
   const citate = state.srcRows.filter((r) => r.cites > 0).length;
+  const soloAbs = state.srcRows.filter((r) => r.s.abstract_only).length;
   box.innerHTML =
     `<div class="rview-bar">` +
     `<span class="src-counters mono">` +
@@ -2272,6 +2274,7 @@ function renderSourcesView(data) {
     `<span title="Scaricate e lette con successo — stesso criterio del contatore 'fonti' della statusbar">lette <b>${lette}</b></span>` +
     `<span title="Non lette: errore di fetch o di estrazione">fallite <b>${fallite}</b></span>` +
     `<span title="Stesso contenuto di un'altra fonte già acquisita nel run">duplicati <b>${duplicati}</b></span>` +
+    `<span title="Fonti lette di cui è disponibile solo l'abstract (nessun testo completo): le citazioni tratte da queste fonti vengono dall'abstract">solo abstract <b>${soloAbs}</b></span>` +
     `<span title="Citata almeno una volta nel report finale">citata <b>${citate}</b></span></span>` +
     `<input id="src-filter" type="search" placeholder="filtra fonti…" autocomplete="off" ` +
     `aria-label="Filtra le fonti"></div>` +
@@ -2287,8 +2290,12 @@ function renderSrcList(q) {
   const ul = $("src-list");
   if (!ul || !state.srcRows) return;
   q = (q || "").toLowerCase().trim();
-  const rows = state.srcRows.filter(({ s }) => !q ||
-    `${s.title || ""} ${s.url || ""} ${s.domain || ""}`.toLowerCase().includes(q));
+  const rows = state.srcRows.filter(({ s }) => {
+    if (!q) return true;
+    const hay = `${s.title || ""} ${s.url || ""} ${s.domain || ""} ` +
+      `${s.abstract_only ? "solo abstract" : ""}`;
+    return hay.toLowerCase().includes(q);
+  });
   ul.innerHTML = rows.map(({ s, cites, nums, dup }) => {
     const url = s.url_final || s.url || "";
     // badge di stato per riga: letta (ok) / fallita (errore) / duplicata
@@ -2308,6 +2315,11 @@ function renderSrcList(q) {
       `<div class="src-line"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">` +
       `${escapeHtml(s.title || url)}</a>` +
       stBadge +
+      (s.abstract_only
+        ? '<span class="badge abstract" title="Da questa pagina è disponibile ' +
+          "solo l'abstract (nessun testo completo): le citazioni di questa " +
+          "fonte provengono dall'abstract.\">solo abstract</span>"
+        : "") +
       (dup ? '<span class="badge neutral" title="Contenuto duplicato di un\'altra fonte nel run">duplicata</span>' : "") +
       `</div>` +
       `<div class="src-meta">` +

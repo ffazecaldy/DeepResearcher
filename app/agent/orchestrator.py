@@ -437,7 +437,9 @@ class Orchestrator:
                             self.emit(ctx, "source_fetched", cycle,
                                       source_id=doc.source_id,
                                       url=doc.final_url or doc.url,
-                                      reused=False)
+                                      reused=False,
+                                      abstract_only=bool(
+                                          getattr(doc, "abstract_only", False)))
                             # B14: solo i NON duplicati proseguono verso la
                             # valutazione (decisions) e la lettura (reader):
                             # i duplicati restano SOLO come log su storage/eventi
@@ -806,7 +808,8 @@ class Orchestrator:
             doc.http_status, doc.content_type, doc.fetch_status.value,
             doc.published_at, doc.author, doc.redirects, doc.error, doc.byte_len,
             content_hash=getattr(doc, "content_hash", ""),
-            identity_key=getattr(doc, "identity_key", ""))
+            identity_key=getattr(doc, "identity_key", ""),
+            abstract_only=bool(getattr(doc, "abstract_only", False)))
 
     def _identity_keys_of(self, doc) -> list[str]:
         """Chiavi d'identita' bibliografica del doc (convenzione fetcher:

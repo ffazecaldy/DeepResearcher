@@ -43,8 +43,9 @@ def extract_html(html: str, url: str | None = None) -> tuple[str, dict[str, Any]
     """Extract main text and metadata from an HTML string.
 
     Returns ``(text, meta)`` where ``meta = {"title", "author", "published_at",
-    "doi", "pmid", "pmcid", "canonical_url"}`` (values are ``str | None``;
-    ``published_at`` e' validata: data plausibile normalizzata o None).
+    "doi", "pmid", "pmcid", "canonical_url", "abstract_only"}`` (values are
+    ``str | None``; ``published_at`` e' validata: data plausibile normalizzata
+    o None; ``abstract_only`` e' bool).
     Never raises.
     """
     meta: dict[str, Any] = {"title": None, "author": None, "published_at": None,
@@ -69,6 +70,13 @@ def extract_html(html: str, url: str | None = None) -> tuple[str, dict[str, Any]
 
     meta["published_at"] = _resolve_published_at(
         html, meta.get("published_at"), trusted)
+    # B20b: pagina abstract-only (calcolata QUI: servono i meta completi del
+    # head e l'HTML raw, che il meta curato e il testo estratto perdono)
+    try:
+        meta["abstract_only"] = abstract_only_from(
+            _meta_map(_head(html)), text or "", html)
+    except Exception:  # noqa: BLE001 - segnale di UI: mai blocca l'estrazione
+        meta["abstract_only"] = False
     if not text:
         return "", meta
     return _tidy(text), meta
@@ -414,3 +422,48 @@ def _resolve_published_at(html: str, candidate: Any,
     if _only_in_bibliography(html, year):
         return None
     return norm
+
+
+# ---------- pagina abstract-only ------------------------------------------
+# Meta specifici dell'abstract (Google Scholar / OJS / Atypon): presence nel
+# <head> e' un segnale forte; description/og:description generici NON lo sono
+# (li hanno anche le landing page complete).
+_ABSTRACT_META_KEYS = ("citation_abstract", "dc.description")
+# riga "Abstract" da sola nel TESTO (estrattori senza heading)
+_ABSTRACT_LINE_RE = re.compile(r"(?m)^\s*#{0,6}\s*abstracts?\s*:?\s*$", re.IGNORECASE)
+# heading "Abstract" nell'HTML RAW (trafilatura/readability scartano gli
+# heading: il segnale va cercato nel sorgente, stile PubMed <h2>Abstract</h2>)
+_ABSTRACT_HEADING_RE = re.compile(
+    r"<h[1-6]\b[^>]*>[^<]{0,60}?\babstracts?\b[^<]{0,60}?</h[1-6]>", re.IGNORECASE)
+# contenitore semanticamente marcato (<section class="abstract">, div id=...)
+_ABSTRACT_CONTAINER_RE = re.compile(
+    r"<(?:section|div)\b[^>]*\b(?:id|class)\s*=\s*[\"'][^\"']*\babstract"
+    r"[^\"']*[\"']", re.IGNORECASE)
+# sopra questa lunghezza c'e' testo completo: nessun abstract-only
+ABSTRACT_ONLY_MAX_CHARS = 3000
+
+
+def abstract_only_from(meta: dict, text: str, html: str = "") -> bool:
+    """True se dalla pagina e' disponibile SOLO l'abstract del lavoro.
+
+    Euristica dichiarata (non e' un giudizio di qualita'): serve a segnalare
+    nel UI che le citazioni di questa fonte provengono dall'abstract, non dal
+    testo completo. Richiede testo BREVE e almeno un segnale:
+    - meta citation_abstract / dc.description nel <head> (``meta`` = mappa
+      completa dei meta del head, non i campi curati di extract_html);
+    - heading "Abstract" nell'HTML RAW;
+    - contenitore con id/class "abstract";
+    - riga "Abstract" da sola nel testo estratto.
+    Un testo lungo non e' mai abstract-only qualunque segnale ci sia.
+    """
+    if not text:
+        return False
+    t = text.strip()
+    if len(t) > ABSTRACT_ONLY_MAX_CHARS:
+        return False
+    if any((meta.get(k) or "").strip() for k in _ABSTRACT_META_KEYS):
+        return True
+    if html:
+        if _ABSTRACT_HEADING_RE.search(html) or _ABSTRACT_CONTAINER_RE.search(html):
+            return True
+    return bool(_ABSTRACT_LINE_RE.search(t[:1500]))

@@ -203,6 +203,8 @@ button.wbadge:hover{background:var(--amber-soft)}
 .badge.running{border-color:var(--amber-dk);color:var(--amber);background:var(--amber-soft)}
 .badge.completed{border-color:var(--gain);color:var(--gain)}
 .badge.completed-warnings{border-color:var(--warn);color:var(--warn)}
+/* B20b: fonte disponibile solo come abstract (limitazione, non errore) */
+.badge.abstract{border-color:var(--warn);color:var(--warn)}
 .badge.failed{border-color:var(--loss);color:var(--loss)}
 .badge.cancelled,.badge.loading{border-color:var(--amber-dk);color:var(--amber)}
 .badge.neutral{color:var(--faint)}
