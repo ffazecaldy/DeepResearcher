@@ -503,6 +503,14 @@ button.vs:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);max-width:80vw;
   background:var(--panel);border:1px solid var(--amber-dk);border-radius:5px;
   padding:8px 13px;font-family:var(--mono);font-size:11px;color:var(--txt);z-index:100}
+/* B20a: bottone azione dentro il toast (es. "Annulla" eliminazione) */
+.toast .toast-act{margin-left:10px;background:var(--amber-dk);color:#111;
+  border:0;border-radius:4px;padding:3px 9px;font:inherit;cursor:pointer;
+  min-height:20px}
+.toast .toast-act:hover{filter:brightness(1.15)}
+/* B20a: riga cronologia in eliminazione pendente (Annulla la riporta) */
+li.pending-del{opacity:.42}
+li.pending-del .q{text-decoration:line-through}
 
 /* ══════════════════════════════════════════════════════════════════════════
    UX 2.0 — run header, dettagli tecnici, viste report, lettura, stampa

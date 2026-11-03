@@ -159,11 +159,23 @@ async function api(path, opts) {
 }
 const apiJson = (path, opts) => api(path, opts).then((r) => r.json());
 
-function toast(msg) {
+/* B20a: toast con azione opzionale (es. "Annulla" dopo l'eliminazione);
+   senza azione resta il comportamento breve di prima */
+function toast(msg, action = null) {
   const t = $("toast");
   t.textContent = msg;
+  if (action) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "toast-act";
+    b.textContent = action.label;
+    b.onclick = () => { t.hidden = true; action.fn(); };
+    t.appendChild(b);
+    setTimeout(() => { t.hidden = true; }, 8000);
+  } else {
+    setTimeout(() => { t.hidden = true; }, 3500);
+  }
   t.hidden = false;
-  setTimeout(() => { t.hidden = true; }, 3500);
 }
 
 /* ============================== sse ============================== */
@@ -1246,7 +1258,8 @@ async function refreshHistory() {
       `json</a>` +
       `<a href="/api/runs/${r.id}/report.pdf" title="apri pdf">` +
       `${icon("file", "ic s12")}</a>` +
-      `<button data-del="${r.id}" aria-label="Elimina run">` +
+      `<button data-del="${r.id}" aria-label="Elimina questa ricerca" ` +
+      `title="Elimina questa ricerca">` +
       `${icon("trash", "ic s12")}</button>` +
       `</span></div>`;
     let li = existing.get(r.id);
@@ -1305,7 +1318,7 @@ function wireHistoryItem(li, r) {
     loadRun(r.id);
   };
   const del = li.querySelector("[data-del]");
-  if (del) del.onclick = () => deleteRun(r.id);
+  if (del) del.onclick = () => deleteRun(r.id, r.question);
 }
 
 async function loadRun(runId, opts = {}) {
@@ -1380,17 +1393,55 @@ async function loadRun(runId, opts = {}) {
   }
 }
 
-async function deleteRun(runId) {
-  if (!confirm("Eliminare definitivamente questo run?")) return;
-  try {
-    await api(`/api/runs/${runId}`, { method: "DELETE" });
-    if (state.runId === runId) {
-      resetPanels();
-      setStatus("idle");
-      state.runId = null;
+async function deleteRun(runId, title) {
+  /* B20a: eliminazione con ANNULLA al posto del confirm distruttivo.
+     Il cestino programma la DELETE vera dopo 8s: la riga resta dimmed e il
+     toast mostra il TITOLO della ricerca + "Annulla". Se la pagina si chiude
+     prima del timer il run sopravvive (annullamento per inazione).
+     L'ID stabile garantisce che dopo filtro/riordino si elimini esattamente
+     la voce selezionata. Svuota cronologia resta un'azione separata. */
+  if (PENDING_DELETES.has(runId)) return;
+  const rowSel = `#history-list li[data-run-id="${CSS.escape(runId)}"]`;
+  const dim = () => {
+    const li = document.querySelector(rowSel);
+    if (li) li.classList.add("pending-del");
+  };
+  const undim = () => {
+    const li = document.querySelector(rowSel);
+    if (li) li.classList.remove("pending-del");
+  };
+  dim();
+  PENDING_DELETES.set(runId, setTimeout(async () => {
+    PENDING_DELETES.delete(runId);
+    try {
+      await api(`/api/runs/${runId}`, { method: "DELETE" });
+      if (state.runId === runId) {
+        resetPanels();
+        setStatus("idle");
+        state.runId = null;
+      }
+      await refreshHistory();
+    } catch (e) {
+      undim();
+      toast(`Eliminazione fallita: ${e.message}`);
     }
-    await refreshHistory();
-  } catch (e) { toast(`Eliminazione fallita: ${e.message}`); }
+  }, 8000));
+  const label = title ? `«${String(title).slice(0, 60)}»` : "selezionata";
+  toast(`Ricerca ${label} eliminata`, { label: "Annulla", fn: () => undoDelete(runId) });
+}
+
+/* B20a: eliminazioni programmate non ancora eseguite (Annulla le revoca) */
+const PENDING_DELETES = new Map();
+
+function undoDelete(runId) {
+  const t = PENDING_DELETES.get(runId);
+  if (!t) return; /* B20a: la DELETE è già partita — niente da revocare */
+  clearTimeout(t);
+  PENDING_DELETES.delete(runId);
+  const li =
+    document.querySelector(`#history-list li[data-run-id="${CSS.escape(runId)}"]`);
+  if (li) li.classList.remove("pending-del");
+  toast("Eliminazione annullata");
 }
 
 /* ============================== settings ============================== */
@@ -1526,6 +1577,12 @@ function setReportEmpty() {
 
 async function clearHistory() {
   if (!confirm("Svuotare DEFINITIVAMENTE tutta la cronologia?")) return;
+  /* B20a: revoca le eliminazioni pendenti (i loro timer farebbero DELETE
+     su run che questo svuotamento sta già cancellando) */
+  for (const t of PENDING_DELETES.values()) clearTimeout(t);
+  PENDING_DELETES.clear();
+  document.querySelectorAll("#history-list li.pending-del")
+    .forEach((li) => li.classList.remove("pending-del"));
   try {
     await api("/api/runs", { method: "DELETE" });
     resetPanels();
