@@ -1139,8 +1139,9 @@ async function openCitation(n) {
   } else {
     const parts = [];
     for (const c of claims) {
+      const evIds = claimEvidenceIds(c);
       const evs = (data.evidences || []).filter(
-        (e) => (c.evidence_ids || []).includes(e.evidence_id));
+        (e) => evIds.includes(evKey(e)));
       const ver = (data.verifications || []).filter(
         (v) => v.claim_id === c.id);
       parts.push(`<p><b>Claim:</b> ${escapeHtml(c.text)}</p>`);
@@ -2153,13 +2154,32 @@ async function initReportViews() {
 }
 
 /* numero di citazioni del report che poggiano su ciascuna fonte */
+/* B20d: report.json serve le righe SQLite GREZZE — le claims portano
+   evidence_ids_json (STRINGA JSON) e le evidences usano `id`, non i nomi
+   evidence_ids/evidence_id che il codice JS si aspettava. La mappa
+   citazioni→fonti restava quindi sempre vuota: "citata 0", "non citata"
+   e pulsanti evidenze assenti su OGNI run. Normalizza in un punto. */
+function claimEvidenceIds(c) {
+  if (!c) return [];
+  if (Array.isArray(c.evidence_ids)) return c.evidence_ids;
+  const raw = c.evidence_ids_json;
+  if (typeof raw === "string" && raw) {
+    try {
+      const v = JSON.parse(raw);
+      if (Array.isArray(v)) return v;
+    } catch { /* json malformato: nessuna evidenza collegata */ }
+  }
+  return [];
+}
+const evKey = (e) => (e && (e.evidence_id || e.id)) || null;
+
 function citationCounts(data) {
   const bySource = new Map();
-  const evById = new Map((data.evidences || []).map((e) => [e.evidence_id, e]));
+  const evById = new Map((data.evidences || []).map((e) => [evKey(e), e]));
   for (const c of data.claims || []) {
     const n = c.final_citation_no ?? c.citation_no;
     if (n == null) continue;
-    for (const eid of c.evidence_ids || []) {
+    for (const eid of claimEvidenceIds(c)) {
       const e = evById.get(eid);
       if (!e || !e.source_id) continue;
       if (!bySource.has(e.source_id)) bySource.set(e.source_id, new Set());
@@ -2345,7 +2365,7 @@ function renderVerifsView(data) {
   if (!box) return;
   state.verifsData = data;
   const claimsById = new Map((data.claims || []).map((c) => [c.id, c]));
-  const evById = new Map((data.evidences || []).map((e) => [e.evidence_id, e]));
+  const evById = new Map((data.evidences || []).map((e) => [evKey(e), e]));
   // FIX 12 (FAILED): la frase e' ancora nel report finale o gia' gestita?
   const md = normText(String(data.report_markdown || ""));
   const inReport = (c) => {
@@ -2378,7 +2398,7 @@ function renderVerifsView(data) {
     const cause = parseCause(v.reason);
     const restTxt = stripCauseToken(rest);
     const n = c ? (c.final_citation_no ?? c.citation_no) : null;
-    const evs = c ? (c.evidence_ids || []).map((id) => evById.get(id)).filter(Boolean) : [];
+    const evs = c ? claimEvidenceIds(c).map((id) => evById.get(id)).filter(Boolean) : [];
     let evHtml = "";
     if (evs.length) {
       evHtml = n != null
